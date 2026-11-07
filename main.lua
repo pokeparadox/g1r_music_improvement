@@ -282,6 +282,139 @@ return function(mod)
     return "songs/" .. hash .. "_" .. safeId .. ".lua"
   end
 
+  local cacheIndexPath = "songs/index.txt"
+  local cacheIndexPaths = {}
+  local cacheIndexSet = {}
+  local cacheIndexReady = false
+
+  local function isGeneratedCachePath(path)
+    if type(path) ~= "string" or path:sub(1, 6) ~= "songs/"
+        or path == cacheIndexPath then
+      return false
+    end
+    local filename = path:sub(7)
+    return filename ~= "" and not filename:find("[/\\]")
+      and not filename:find("[%z\1-\31]")
+      and filename:match("%.lua$") ~= nil
+  end
+
+  local function cacheFileExists(path)
+    if type(mod.cache.info) ~= "function" then
+      mod.log:error("music_improvement: cache info API unavailable for %s", path)
+      return nil
+    end
+    local ok, info = pcall(mod.cache.info, mod.cache, path)
+    if not ok then
+      mod.log:error("music_improvement: cannot inspect cached file %s: %s",
+        path, tostring(info))
+      return nil
+    end
+    return info ~= nil and info ~= false
+  end
+
+  local function readCacheIndex()
+    local exists = cacheFileExists(cacheIndexPath)
+    if exists == nil then return nil end
+    if not exists then return {}, {} end
+    if type(mod.cache.read) ~= "function" then
+      mod.log:error("music_improvement: cache read API unavailable for index")
+      return nil
+    end
+    local ok, contents = pcall(mod.cache.read, mod.cache, cacheIndexPath)
+    if not ok or type(contents) ~= "string" then
+      mod.log:error("music_improvement: cannot read cache index%s",
+        ok and "" or ": " .. tostring(contents))
+      return nil
+    end
+
+    local paths, seen = {}, {}
+    for path in contents:gmatch("[^\r\n]+") do
+      if not isGeneratedCachePath(path) then
+        mod.log:error("music_improvement: invalid path in cache index: %s", path)
+        return nil
+      end
+      if not seen[path] then
+        paths[#paths + 1] = path
+        seen[path] = true
+      end
+    end
+    return paths, seen
+  end
+
+  local function writeCacheIndex(paths)
+    if type(mod.cache.write) ~= "function" then
+      mod.log:error("music_improvement: cache write API unavailable for index")
+      return false
+    end
+    local contents = #paths > 0 and (table.concat(paths, "\n") .. "\n") or ""
+    local ok, result, writeErr = pcall(mod.cache.write, mod.cache, cacheIndexPath, contents)
+    if not ok or result == false then
+      mod.log:error("music_improvement: failed to write cache index%s",
+        ok and ": " .. tostring(writeErr) or ": " .. tostring(result))
+      return false
+    end
+    if cacheFileExists(cacheIndexPath) ~= true then
+      mod.log:error("music_improvement: cache index is missing after write")
+      return false
+    end
+    return true
+  end
+
+  local function indexGeneratedCachePath(path)
+    if not isGeneratedCachePath(path) then
+      mod.log:error("music_improvement: refusing to index invalid cache path %s",
+        tostring(path))
+      return false
+    end
+    if not cacheIndexReady then
+      local paths, seen = readCacheIndex()
+      if not paths then return false end
+      cacheIndexPaths, cacheIndexSet = paths, seen
+      cacheIndexReady = true
+    end
+    if cacheIndexSet[path] then return true end
+
+    local updated = {}
+    for _, indexedPath in ipairs(cacheIndexPaths) do
+      updated[#updated + 1] = indexedPath
+    end
+    updated[#updated + 1] = path
+    if not writeCacheIndex(updated) then return false end
+    cacheIndexPaths = updated
+    cacheIndexSet[path] = true
+    return true
+  end
+
+  local function deleteCacheFile(path)
+    local exists = cacheFileExists(path)
+    if exists == nil then return false end
+    if not exists then return true end
+    if type(mod.cache.delete) ~= "function" then
+      mod.log:error("music_improvement: cache delete API unavailable for %s", path)
+      return false
+    end
+    local ok, result = pcall(mod.cache.delete, mod.cache, path)
+    if not ok or result == false then
+      mod.log:error("music_improvement: failed to delete cached file %s%s",
+        path, ok and "" or ": " .. tostring(result))
+      return false
+    end
+    exists = cacheFileExists(path)
+    if exists ~= false then
+      mod.log:error("music_improvement: cached file still exists after deletion: %s", path)
+      return false
+    end
+    return true
+  end
+
+  do
+    local paths, seen = readCacheIndex()
+    if paths then
+      cacheIndexPaths, cacheIndexSet = paths, seen
+      cacheIndexReady = true
+    end
+  end
+
   local function loadCached(path)
     local bytes = mod.cache:read(path)
     if type(bytes) ~= "string" then return nil end
@@ -324,6 +457,7 @@ return function(mod)
             cachedDef = loadCached(cachePath(id, hash))
           end
           if cachedDef then
+            indexGeneratedCachePath(cachePath(id, hash))
             local improvedId = improvedIdFor(id)
             local okReg = pcall(mod.content.music.register, mod.content.music, improvedId, cachedDef)
             if not okReg then
@@ -364,67 +498,48 @@ return function(mod)
   end
 
   local function clearSongCache()
-    if not (love and love.filesystem
-        and type(love.filesystem.getDirectoryItems) == "function"
-        and type(love.filesystem.remove) == "function") then
-      mod.log:error("music_improvement: cannot clear song cache: filesystem API unavailable")
-      return false
+    local indexedPaths, indexedSet = readCacheIndex()
+    if not indexedPaths then return false end
+
+    for _, path in ipairs(indexedPaths) do
+      if not deleteCacheFile(path) then return false end
     end
 
-    local root = "mod_cache/music_improvement/songs"
-
-    -- Remove generated cache contents recursively, without touching other mod data.
-    local function removeTree(path, removeSelf)
-      local okItems, items = pcall(love.filesystem.getDirectoryItems, path)
-      if not okItems or type(items) ~= "table" then
-        mod.log:error("music_improvement: cannot list cache directory %s", path)
-        return false
-      end
-
-      local success = true
-      for _, name in ipairs(items) do
-        local child = path .. "/" .. name
-        local isDirectory = false
-        if type(love.filesystem.getInfo) == "function" then
-          local okInfo, info = pcall(love.filesystem.getInfo, child)
-          isDirectory = okInfo and type(info) == "table" and info.type == "directory"
+    local ids = {}
+    if okData and type(Data) == "table" and type(Data.audio) == "table"
+        and type(Data.audio.songs) == "table" then
+      for id in pairs(Data.audio.songs) do
+        if not tostring(id):match("^Music_Improved") then
+          ids[#ids + 1] = id
         end
+      end
+    end
+    table.sort(ids)
 
-        if isDirectory then
-          if not removeTree(child, true) then success = false end
-        else
-          local okRemove, removed = pcall(love.filesystem.remove, child)
-          if not okRemove or removed == false then
-            mod.log:error("music_improvement: failed to remove cached file %s", child)
-            success = false
+    local legacyVersions = { "0.4.6", tostring(mod.manifest.version or "0") }
+    local legacySeen = {}
+    for _, version in ipairs(legacyVersions) do
+      if not legacySeen[version] then
+        legacySeen[version] = true
+        for _, id in ipairs(ids) do
+          local path = cachePath(id, version .. "_true")
+          if not isGeneratedCachePath(path) then
+            mod.log:error("music_improvement: refusing to delete invalid legacy cache path %s",
+              path)
+            return false
+          end
+          if not indexedSet[path] and not deleteCacheFile(path) then
+            return false
           end
         end
       end
-
-      if removeSelf then
-        local okRemove, removed = pcall(love.filesystem.remove, path)
-        if not okRemove or removed == false then
-          mod.log:error("music_improvement: failed to remove cache directory %s", path)
-          success = false
-        end
-      end
-      return success
     end
 
-    if type(love.filesystem.getInfo) == "function" then
-      local okInfo, info = pcall(love.filesystem.getInfo, root)
-      if okInfo and info == nil then return true end -- No cache exists yet.
-      if not okInfo then
-        mod.log:error("music_improvement: cannot inspect cache directory %s", root)
-        return false
-      end
-    end
-
-    local cleared = removeTree(root, false)
-    if cleared then
-      mod.log:info("music_improvement: cleared generated song cache")
-    end
-    return cleared
+    if not deleteCacheFile(cacheIndexPath) then return false end
+    cacheIndexPaths, cacheIndexSet = {}, {}
+    cacheIndexReady = true
+    mod.log:info("music_improvement: cleared indexed generated song cache")
+    return true
   end
 
   local function regenerateCache(game)
@@ -473,7 +588,21 @@ return function(mod)
         if serialize then
           local okSer, bytes = pcall(serialize, translated)
           if okSer and type(bytes) == "string" then
-            pcall(mod.cache.write, mod.cache, cachePath(id, hash), bytes)
+            local path = cachePath(id, hash)
+            if indexGeneratedCachePath(path) then
+              local okWrite, result, writeErr =
+                pcall(mod.cache.write, mod.cache, path, bytes)
+              if not okWrite or result == false then
+                mod.log:error("music_improvement: failed to write cached file %s%s",
+                  path, okWrite and ": " .. tostring(writeErr)
+                    or ": " .. tostring(result))
+              elseif cacheFileExists(path) ~= true then
+                mod.log:error("music_improvement: cached file is missing after write: %s",
+                  path)
+              end
+            else
+              mod.log:error("music_improvement: skipping unindexed cached file %s", path)
+            end
           end
         end
       end

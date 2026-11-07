@@ -48,7 +48,7 @@ This keeps the enhanced soundtrack consistent with the game's original audio arc
 
 ### 💾 Music Preparation and Caching
 - Enhanced arrangements are generated and cached.
-- Cached music can be regenerated through the mod options.
+- Cached music can be regenerated through the mod options; regeneration removes only indexed generated files and known legacy song-cache filenames.
 
 ### 🎼 Music Testing
 Includes a music testing/jukebox screen that allows available music tracks to be selected and played directly.

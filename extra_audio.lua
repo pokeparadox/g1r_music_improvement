@@ -84,9 +84,9 @@ return function()
       if fl > 1 then fl = 1 elseif fl < -1 then fl = -1 end
       if fr > 1 then fr = 1 elseif fr < -1 then fr = -1 end
       if channels >= 6 then
-        local center = (fl + fr) * 0.5 * 0.4
-        local rearL = fl * 0.6
-        local rearR = fr * 0.6
+        local center = (fl + fr) * 0.5
+        local rearL = fl * 0.9
+        local rearR = fr * 0.9
         local lfeIn = (fl + fr) * 0.5
         state.lpfState = state.lpfState + state.lpfAlpha * (lfeIn - state.lpfState)
         local lfe = state.lpfState * 0.7
