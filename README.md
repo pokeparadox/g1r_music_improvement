@@ -5,6 +5,7 @@ AI Usage Disclosure. I am not a LUA dev and OpenCode was used to develop this ad
 ## Overview
 
 Music Improvement enhances the game's original Game Boy-style chiptune soundtrack, transforming the familiar melodies into fuller, richer arrangements while preserving the original musical identity.
+It supports both Gen1 and Gen2 chip-music engine formats.
 
 Rather than replacing the original sound system with external instruments or prerecorded audio, the mod builds upon the game's existing chip-music synthesis engine. Original music is analysed, enhanced and reassembled into improved arrangements, with additional harmony layers generated dynamically from the original musical parts.
 
@@ -47,7 +48,9 @@ The added harmonies are applied as a stero mix with 80%/60% stereo bleed
 This keeps the enhanced soundtrack consistent with the game's original audio architecture.
 
 ### 💾 Music Preparation and Caching
-- Enhanced arrangements are generated and cached.
+- On first launch, choose whether to generate the enhanced music cache; choosing **NO** skips enhanced playback.
+- Enhanced arrangements are generated and cached after choosing **YES**.
+- The Options menu exposes the enhancement toggle, Music Test, and cache regeneration inside Gold's Audio options.
 - Cached music can be regenerated through the mod options; regeneration removes only indexed generated files and known legacy song-cache filenames.
 
 ### 🎼 Music Testing

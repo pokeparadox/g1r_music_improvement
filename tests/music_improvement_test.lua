@@ -8,8 +8,44 @@ local T = require("tests.modkit")
 local Runtime = require("src.mods.Runtime")
 local Data = T.fixtures.load()
 Data.audio = Data.audio or {}
-Data.audio.songs = Data.audio.songs or {}
-Data.audio.songs.Music_CacheCleanupTest = {}
+Data.audio.songs = {}
+Data.audio.gen2 = true
+local gen2SongId = "Music_Gen2CacheTest"
+local gen2Address, gen2Bank = 0x7FFE, 0x7E
+Data.audio.songs[gen2SongId] = {
+  address = gen2Address,
+  bank = gen2Bank,
+}
+
+local ChipSynth = require("src.core.ChipSynth")
+local originalNewEngine = ChipSynth.newEngine
+local gen2HeaderSeen
+ChipSynth.newEngine = function(data, header, options)
+  if type(header) == "table" and header.address == gen2Address
+      and header.bank == gen2Bank then
+    gen2HeaderSeen = header
+    local engine = { tempo = 0x100, channels = {} }
+    local channel = {
+      engine = engine,
+      hardware = 1,
+      speed = 12,
+      timeTicks = 0,
+      ended = false,
+    }
+    function channel:frequency(note, octave)
+      return 1000 + note * 2 + octave
+    end
+    function channel:nextEvent()
+      if self.emitted then return nil end
+      self.emitted = true
+      self.timeTicks = 12 * 0x100
+      return { register = 1000, volume = 8, fade = 0, duty = 1 }
+    end
+    engine.channels[1] = channel
+    return engine
+  end
+  return originalNewEngine(data, header, options)
+end
 
 local run = T.sdk.loadMod("mods/g1r_music_improvement", { data = Data })
 T.check(#run.errors == 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
@@ -23,6 +59,23 @@ if musicMod then
   cache = cacheApi
 end
 local exports = musicMod and musicMod.exports
+
+T.eq(gen2HeaderSeen and gen2HeaderSeen.engine, "gen2",
+  "Gen2 engine selector reaches ChipSynth")
+local gen2CachePath = "songs/" .. tostring(musicMod and musicMod.manifest
+  and musicMod.manifest.version or "0")
+  .. "_true_Music_Gen2CacheTest.lua"
+local gen2Bytes = cache and cache:read(gen2CachePath)
+local gen2Cached
+if type(gen2Bytes) == "string" then
+  local chunk = load(gen2Bytes)
+  if chunk then gen2Cached = chunk() end
+end
+T.eq(gen2Cached and gen2Cached.chip and gen2Cached.chip.engine, 1,
+  "generated base cache uses the normalized chip-program format")
+T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
+    and gen2Cached.extra.left.chip and gen2Cached.extra.left.chip.engine,
+  1, "generated harmony cache uses the normalized chip-program format")
 
 -- ------- regeneration uses only the scoped mod cache API
 
@@ -92,6 +145,19 @@ T.eq(select("Music_Routes1", { reason = "map", mapId = "ROUTE_1" }),
   "Music_Routes1", "every other map defers to the vanilla choice")
 T.eq(select("Music_PalletTown", nil), "Music_PalletTown",
   "a direct play with no context defers")
+T.eq(select(gen2SongId, { reason = "map" }),
+  "Music_ImprovedGen2CacheTest", "Gen2 song selection uses its enhanced mapping")
+
+local optionRows = Runtime.call("ui.options.rows",
+  function(_, rows) return rows end, { data = Data },
+  { { id = "sound", label = "SOUND" }, { id = "text_speed", label = "TEXT SPEED" } })
+T.eq(optionRows[2] and optionRows[2].musicImprovementId,
+  "music_improvement_enabled",
+  "music controls are visible immediately after the first options row")
+T.eq(optionRows[3] and optionRows[3].musicImprovementId, "music_improvement_jukebox",
+  "Music Test is reachable from the visible options group")
+T.eq(optionRows[4] and optionRows[4].musicImprovementId, "music_improvement_regenerate",
+  "cache regeneration is reachable from the visible options group")
 
 if cache and exports and type(cache.delete) == "function" then
   local failurePath = "songs/test_delete_failure.lua"
@@ -108,5 +174,6 @@ if cache and exports and type(cache.delete) == "function" then
     "regeneration stops before changing settings when cache deletion fails")
 end
 
+ChipSynth.newEngine = originalNewEngine
 run.release()
 T.finish("g1r_music_improvement")

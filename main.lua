@@ -75,8 +75,12 @@ return function(mod)
       mod.log:error("music_improvement: ChipSynth/Data unavailable -- cannot translate %s", id)
       return nil
     end
+    local engineType = def.engine
+    if engineType == nil and Data.audio and Data.audio.gen2 == true then
+      engineType = "gen2"
+    end
     local okEngine, engine = pcall(ChipSynth.newEngine, Data, {
-      address = def.address, bank = def.bank,
+      address = def.address, bank = def.bank, engine = engineType,
     }, { allowLoops = true })
     if not okEngine or type(engine) ~= "table" or not engine.channels then
       mod.log:warn("music_improvement: ChipSynth.newEngine failed for %s: %s", id, tostring(engine))
@@ -106,7 +110,11 @@ return function(mod)
       return bestN, bestO, bestErr
     end
 
-    local src = { tempo = engine.tempo or 0x100, channels = {}, drums = {} }
+    local src = {
+      tempo = engine.tempo or 0x100,
+      channels = {},
+      drums = {},
+    }
   local ordered = {}
   for _, channel in ipairs(engine.channels) do ordered[#ordered + 1] = channel end
   table.sort(ordered, function(a, b) return (a.hardware or 1) < (b.hardware or 1) end)
@@ -266,6 +274,7 @@ return function(mod)
     progressInstance = nil,
     pending = false,
   }
+  local readyGame
 
   local applyAll = true
 
@@ -542,12 +551,13 @@ return function(mod)
     return true
   end
 
+  local startPreparation
   local function regenerateCache(game)
     if not clearSongCache() then
       mod.log:error("music_improvement: regeneration cancelled because old cache could not be cleared")
       return
     end
-    local settings = currentSettings()
+    settings = currentSettings()
     settings.enabled = true
     setModOption(game, "enabled", true)
     if state.progressInstance and game and game.stack then
@@ -558,6 +568,7 @@ return function(mod)
     state.progressPushed = false
     state.progressInstance = nil
     buildQueue(settings, true)
+    if startPreparation then startPreparation(game) end
   end
 
   local function prepareOne(game)
@@ -656,11 +667,17 @@ return function(mod)
             state.skipped = true
             state.pending = false
           end
+          if game and game.stack then pcall(game.stack.pop, game.stack) end
+          state.confirmInstance = nil
+          if state.confirmed and #queue > 0 then
+            startPreparation(game)
+          end
           return true
         end,
         onCancel = function()
           state.skipped = true
           state.pending = false
+          state.confirmInstance = nil
         end,
       })
     end,
@@ -673,7 +690,9 @@ return function(mod)
         progress = completed,
         total = total,
         isOpaque = true,
-        update = function(self, dt) end,
+        update = function(self)
+          prepareOne(game)
+        end,
         draw = function(self)
           local G = love.graphics
           G.setColor(0, 0, 0, 1)
@@ -717,49 +736,67 @@ return function(mod)
   mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     local out = next(game, rows)
     if type(out) ~= "table" then return out end
-    out[#out + 1] = {
-      id = "music_improvement_enabled",
-      label = "MUSIC IMPROVEMENTS",
-      value = function()
-        return mod.options:get("enabled") and "ON" or "OFF"
-      end,
-      activate = function(g)
-        local cur = mod.options:get("enabled")
-        setModOption(g, "enabled", not cur)
-      end,
-    }
+    -- Gold groups rows by a fixed set of built-in IDs; these aliases place
+    -- the mod controls inside AUDIO rather than after Gold's root groups.
+    local musicRows = {
+      {
+        id = "sound",
+        musicImprovementId = "music_improvement_enabled",
+        label = "MUSIC IMPROVEMENTS",
+        value = function()
+          return mod.options:get("enabled") ~= false and "ON" or "OFF"
+        end,
+        activate = function(g)
+          local cur = mod.options:get("enabled") ~= false
+          setModOption(g, "enabled", not cur)
+        end,
+      },
 
-    -- Restore the Music Test entry in the game's options menu.
-    out[#out + 1] = {
-      id = "music_improvement_jukebox",
-      label = "MUSIC TEST",
-      value = function()
-        if state.pending then
-          return string.format("PREPARING %d/%d", completed, total)
-        end
-        return "OPEN"
-      end,
-      activate = function(g)
-        mod.ui.push(g, "MusicImprovementJukebox")
-      end,
-    }
+      {
+        id = "musicVol",
+        musicImprovementId = "music_improvement_jukebox",
+        label = "MUSIC TEST",
+        value = function()
+          if state.pending then
+            return string.format("PREPARING %d/%d", completed, total)
+          end
+          return "OPEN"
+        end,
+        activate = function(g)
+          mod.ui.push(g, "MusicImprovementJukebox")
+        end,
+      },
 
-    out[#out + 1] = {
-      id = "music_improvement_regenerate",
-      label = "REGEN MUSIC",
-      value = function()
-        if state.pending then
-          return string.format("PREPARING %d/%d", completed, total)
-        end
-        return "PRESS A"
-      end,
-      activate = function(g) regenerateCache(g) end,
+      {
+        id = "sfxVol",
+        musicImprovementId = "music_improvement_regenerate",
+        label = "REGEN MUSIC",
+        value = function()
+          if state.pending then
+            return string.format("PREPARING %d/%d", completed, total)
+          end
+          return "PRESS A"
+        end,
+        activate = function(g) regenerateCache(g) end,
+      },
     }
+    if type(mod.ui.insertAfter) == "function" then
+      local anchor = "SOUND"
+      for _, row in ipairs(musicRows) do
+        mod.ui.insertAfter(out, anchor, row)
+        anchor = row.label
+      end
+    else
+      for _, row in ipairs(musicRows) do out[#out + 1] = row end
+    end
     return out
   end)
 
   mod.hooks:wrap("music.select", function(next, chosen, ctx)
     if mod.options:get("enabled") == false then
+      return next(chosen, ctx)
+    end
+    if state.pending and not state.confirmed then
       return next(chosen, ctx)
     end
     if state.skipped then
@@ -775,44 +812,27 @@ return function(mod)
     return next(chosen, ctx)
   end)
 
-  mod.hooks:wrap("core.update", function(next, game, dt)
-    if state.pending and not state.skipped then
-      if not state.confirmed and not state.confirmPushed then
-        if game and game.stack then
-          state.confirmPushed = true
-          state.confirmInstance = mod.ui.push(game, "MusicImprovementConfirm")
-        end
-      end
-      -- pop the confirmation screen once the user has answered
-      if state.confirmInstance and (state.confirmed or state.skipped) and game and game.stack then
-        pcall(game.stack.pop, game.stack)
-        state.confirmInstance = nil
-      end
-      if state.confirmed and #queue > 0 then
-        if game and game.stack and not state.progressPushed then
-          state.progressPushed = true
-          state.progressInstance = mod.ui.push(game, "MusicImprovementProgress")
-          if state.progressInstance then
-            state.progressInstance.progress = completed
-            state.progressInstance.total = total
-          end
-        end
-        prepareOne(game)
-      end
-      -- pop progress screen when finished
-      if state.progressPushed and #queue == 0 and state.progressInstance and game and game.stack then
-        pcall(game.stack.pop, game.stack)
-        state.progressInstance = nil
-        state.progressPushed = false
+  startPreparation = function(game)
+    if #queue == 0 then
+      state.pending = false
+      return
+    end
+    if game and game.stack and not state.progressPushed then
+      state.progressPushed = true
+      state.progressInstance = mod.ui.push(game, "MusicImprovementProgress")
+      if state.progressInstance then
+        state.progressInstance.progress = completed
+        state.progressInstance.total = total
       end
     end
-    return next(game, dt)
-  end)
+  end
 
   -- realtime extra harmony stream
   local function applyChannelMix()
     if not okChipAudio or type(ChipAudio) ~= "table" then return end
-    local noiseVolume = (mod.options:get("enabled") ~= false) and 1.5 or 1
+    local enhancementActive = mod.options:get("enabled") ~= false
+      and not state.skipped and (not state.pending or state.confirmed)
+    local noiseVolume = enhancementActive and 1.5 or 1
     pcall(ChipAudio.setChannelVolumes, { 1, 1, 1, noiseVolume })
   end
   mod.events:on("music.started", function(payload)
@@ -821,7 +841,9 @@ return function(mod)
     if extraAudio then
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
-      if extra then
+      local enhancementActive = mod.options:get("enabled") ~= false
+        and not state.skipped and (not state.pending or state.confirmed)
+      if extra and enhancementActive then
         pcall(extraAudio.start, extra, Data)
       end
     end
@@ -841,18 +863,39 @@ return function(mod)
     return out
   end)
 
-  -- extra stream option toggles
-  mod.hooks:wrap("core.update", function(next, game, dt)
-    if extraAudio then
-      if mod.options:get("enabled") ~= false then
-        pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
-        pcall(extraAudio.update)
-      else
-        pcall(extraAudio.stop)
-      end
+  -- The game does not expose a core.update hook. Wrap the live instance at
+  -- game.ready for audio work, and wait for the first screen push before
+  -- showing the opt-in prompt so it sits above Gold's boot/title screen.
+  mod.events:on("screen.pushed", function()
+    if readyGame and state.pending and not state.confirmed and not state.skipped
+        and not state.confirmPushed and readyGame.stack then
+      state.confirmPushed = true
+      state.confirmInstance = mod.ui.push(readyGame, "MusicImprovementConfirm")
     end
-    pcall(applyChannelMix)
-    return next(game, dt)
+  end)
+  mod.events:on("game.ready", function(payload)
+    local game = payload and (payload.game or payload)
+    if type(game) ~= "table" then return end
+    readyGame = game
+    settings = currentSettings()
+    buildQueue(settings, false)
+    if type(game.update) ~= "function" or game._g1rMusicImprovementUpdateWrapped then
+      return
+    end
+    local nextUpdate = game.update
+    game._g1rMusicImprovementUpdateWrapped = true
+    game.update = function(self, dt)
+      if extraAudio then
+        if mod.options:get("enabled") ~= false then
+          pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
+          pcall(extraAudio.update)
+        else
+          pcall(extraAudio.stop)
+        end
+      end
+      pcall(applyChannelMix)
+      return nextUpdate(self, dt)
+    end
   end)
 
   mod.log:info("music_improvement: %d cached, %d pending", completed, #queue)

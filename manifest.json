@@ -1,18 +1,12 @@
 {
   "id": "g1r_music_improvement",
   "name": "G1R Music Improvement",
-  "version": "0.4.6",
-  "api": 2,
+  "version": "0.4.8",
+  "api": 3,
+  "games": ["gen1", "gen2"],
   "entry": "main.lua",
   "profile": "content",
   "category": "AUDIO",
-  "game_version": ">=0.0.0-0 <2.0.0",
   "priority": 100,
-  "permissions": [
-    "engine_internals"
-  ],
-  "dependencies": [],
-  "optional_dependencies": [],
-  "conflicts": [],
   "description": "Improved Game Boy chip music: upgraded instruments and added harmony channels, all synthesized in-engine."
 }
