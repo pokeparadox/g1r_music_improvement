@@ -62,6 +62,39 @@ return function(mod)
     return song
   end
 
+  -- ChipSynth exposes wave levels as multipliers; ChipAsm wants 0-3 codes.
+  local function waveLevelCode(value)
+    if value == 0 then return 0 end
+    if value == 0.25 then return 3 end
+    if value == 0.5 then return 2 end
+    return 1
+  end
+
+  -- Convert an engine drum segment list (sample ticks) into ChipAsm drum rows
+  -- (frames of 1-16 at 256 ticks each).
+  local function drumRows(segments, frameTicks)
+    frameTicks = frameTicks or 256
+    local rows = {}
+    for _, segment in ipairs(segments or {}) do
+      local startSample = segment.startSample or 0
+      local endSample = segment.endSample or startSample
+      local frames = math.floor((endSample - startSample) / frameTicks + 0.5)
+      if frames < 1 then frames = 1 end
+      while frames > 0 do
+        local chunk = math.min(frames, 16)
+        rows[#rows + 1] = {
+          len = chunk,
+          volume = segment.volume or 0,
+          fade = segment.fade or 0,
+          parameter = segment.parameter or 0,
+        }
+        frames = frames - chunk
+      end
+    end
+    if #rows == 0 then rows[1] = { len = 1, volume = 0 } end
+    return rows
+  end
+
   local extraDefs = {}
   local function registerTranslation(def, settings, id)
     id = id or "Music_PalletTown"
@@ -114,7 +147,9 @@ return function(mod)
       tempo = engine.tempo or 0x100,
       channels = {},
       drums = {},
+      waves = type(engine.waves) == "table" and #engine.waves > 0 and engine.waves or nil,
     }
+  local drumIds = {}
   local ordered = {}
   for _, channel in ipairs(engine.channels) do ordered[#ordered + 1] = channel end
   table.sort(ordered, function(a, b) return (a.hardware or 1) < (b.hardware or 1) end)
@@ -125,6 +160,7 @@ return function(mod)
       local prevTime = 0
       local guard = 0
       local speed = channel.speed or 12
+      local lastSpeed
       local tempo = engine.tempo or 0x100
       while true do
         if channel.ended then break end
@@ -137,12 +173,22 @@ return function(mod)
         prevTime = timeTicks
         local length = math.floor(ticks / (speed * tempo) + 0.5)
         if length < 1 then length = 1 end
+        speed = channel.speed or speed
+        if speed ~= lastSpeed then
+          program[#program + 1] = { notetype = { speed = speed } }
+          lastSpeed = speed
+        end
         if event.silence then
           program[#program + 1] = { rest = length }
         elseif event.noise then
           if event.drum then
-            local drumId = #src.drums + 1
-            src.drums[drumId] = event.drum
+            local drumId = drumIds[event.drum]
+            if not drumId then
+              drumId = #src.drums + 1
+              if drumId > 255 then drumId = 255 end
+              src.drums[drumId] = drumRows(event.drum, channel.frameTicks)
+              drumIds[event.drum] = drumId
+            end
             program[#program + 1] = { drum = drumId, len = length }
           else
             program[#program + 1] = {
@@ -195,7 +241,17 @@ return function(mod)
             program[#program + 1] = { duty = dutyVal }
             lastDuty = dutyVal
           end
-          if event.volume ~= nil or event.fade ~= nil then
+          if channel.wave then
+            local level = waveLevelCode(event.waveLevel)
+            local instrument = math.max(0, math.min(15, event.waveInstrument or 0))
+            local key = "wave:" .. level .. ":" .. instrument
+            if key ~= lastNotetypeKey then
+              program[#program + 1] = {
+                notetype = { speed = speed, waveLevel = level, waveInstrument = instrument },
+              }
+              lastNotetypeKey = key
+            end
+          elseif event.volume ~= nil or event.fade ~= nil then
             local key = tostring(event.volume) .. ":" .. tostring(event.fade)
             if key ~= lastNotetypeKey then
               program[#program + 1] = {
@@ -220,12 +276,16 @@ return function(mod)
   end
   local translated = translate(src, settings)
     if translated then
+      -- ChipAsm emits Gen1 bytecode; without this Gold would decode the
+      -- generated blob with its Gen2 decoder and misread every command.
+      translated.generation = 1
       local extra = extraSpec(src, settings)
       if extra then
         local extraSong = {}
         for side, spec in pairs(extra) do
           local okSong, song = pcall(ChipAsm.song, spec)
           if okSong and type(song) == "table" and type(song.chip) == "table" then
+            song.generation = 1
             extraSong[side] = song
           end
         end
@@ -583,6 +643,8 @@ return function(mod)
       if type(def) == "table" and type(def.address) == "number"
           and type(def.bank) == "number" then
         translated = registerTranslation(def, settings, id)
+      else
+        mod.log:warn("music_improvement: skipping %s (missing ROM address/bank)", tostring(id))
       end
       if translated then
         if translated.extra then

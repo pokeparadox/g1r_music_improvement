@@ -73,9 +73,14 @@ if type(gen2Bytes) == "string" then
 end
 T.eq(gen2Cached and gen2Cached.chip and gen2Cached.chip.engine, 1,
   "generated base cache uses the normalized chip-program format")
+T.eq(gen2Cached and gen2Cached.generation, 1,
+  "generated base cache is pinned to the Gen1 decoder")
 T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
     and gen2Cached.extra.left.chip and gen2Cached.extra.left.chip.engine,
   1, "generated harmony cache uses the normalized chip-program format")
+T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
+    and gen2Cached.extra.left.generation, 1,
+  "generated harmony cache is pinned to the Gen1 decoder")
 
 -- ------- regeneration uses only the scoped mod cache API
 
