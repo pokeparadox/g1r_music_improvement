@@ -4,15 +4,15 @@ return function()
   local okCA, ChipAudio = pcall(require, "src.core.ChipAudio")
   if not okCS or type(ChipSynth) ~= "table" then return nil end
 
-  local state = {
-    engines = {},
-    sideEnabled = { left = true, center = true, right = true },
-    source = nil,
-    extraGain = 0.35,
-    musicVolume = 1.0,
-    chunk = 512,
-
-  }
+    local state = {
+      engines = {},
+      sideEnabled = { left = true, center = true, right = true },
+      source = nil,
+      extraGain = 0.35,
+      musicVolume = 1.0,
+      chunk = 512,
+      lpfAlpha = 0.04,
+    }
 
   local function isPlaying(src)
     if not src then return false end

@@ -1,6 +1,6 @@
 {
-  "id": "music_improvement",
-  "name": "Music Improvement",
+  "id": "g1r_music_improvement",
+  "name": "G1R Music Improvement",
   "version": "0.4.6",
   "api": 2,
   "entry": "main.lua",
