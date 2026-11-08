@@ -11,5 +11,6 @@
   "profile": "content",
   "category": "AUDIO",
   "priority": 100,
-  "description": "Improved Game Boy chip music: upgraded instruments and added harmony channels, all synthesized in-engine."
+  "description": "Improved Game Boy chip music: upgraded instruments and added harmony channels, all synthesized in-engine.",
+  "github": "pokeparadox/g1r_music_improvement"
 }
