@@ -32,7 +32,7 @@ local ChipSynth = require("src.core.ChipSynth")
 local originalNewEngine = ChipSynth.newEngine
 local gen2HeaderSeen
 local gen1HeaderSeen
-local function mockEngine()
+local function mockEngine(includeNoise)
   local engine = { tempo = 0x100, generation = 1, channels = {} }
   local channel = {
     engine = engine,
@@ -83,6 +83,50 @@ local function mockEngine()
     return { register = 1000, volume = 8, fade = 0, duty = 1 }
   end
   engine.channels[1] = channel
+  if includeNoise then
+    local noiseChannel = {
+      engine = engine,
+      hardware = 4,
+      noise = true,
+      frameTicks = 256,
+      speed = 12,
+      timeTicks = 0,
+      ended = false,
+      address = 0x300,
+      eventIndex = 0,
+    }
+    function noiseChannel:byte()
+      local value = 0
+      self.address = self.address + 1
+      return value
+    end
+    function noiseChannel:word()
+      local low, high = self:byte(), self:byte()
+      return low + high * 0x100
+    end
+    function noiseChannel:nextEvent()
+      self.eventIndex = self.eventIndex + 1
+      if self.eventIndex == 1 then
+        self.address = 0x301
+        self.timeTicks = 12 * 0x100
+        return {
+          noise = true,
+          drum = {{
+            startSample = 0,
+            endSample = math.floor(
+              19 * 256 * ChipSynth.SAMPLE_RATE / 15360 + 0.5),
+            volume = 8,
+            fade = 0,
+            parameter = 51,
+          }},
+        }
+      end
+      self.ended = true
+      self.address = 0x304
+      return nil
+    end
+    engine.channels[2] = noiseChannel
+  end
   return engine
 end
 ChipSynth.newEngine = function(data, header, options)
@@ -94,7 +138,7 @@ ChipSynth.newEngine = function(data, header, options)
   if type(header) == "table" and header.address == gen1Address
       and header.bank == gen1Bank then
     gen1HeaderSeen = header
-    return mockEngine()
+    return mockEngine(true)
   end
   return originalNewEngine(data, header, options)
 end
@@ -162,6 +206,15 @@ if type(gen2Bytes) == "string" then
   local chunk = load(gen2Bytes)
   if chunk then gen2Cached = chunk() end
 end
+local gen1CachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
+  and musicMod.manifest.version or "0")
+  .. "_true_" .. gen1SongId .. ".lua"
+local gen1Bytes = cache and cache:read(gen1CachePath)
+local gen1Cached
+if type(gen1Bytes) == "string" then
+  local chunk = load(gen1Bytes)
+  if chunk then gen1Cached = chunk() end
+end
 T.eq(gen2Cached and gen2Cached.chip and gen2Cached.chip.engine, 1,
   "generated base cache uses the normalized chip-program format")
 T.eq(gen2Cached and gen2Cached.generation, 1,
@@ -172,6 +225,13 @@ T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
 T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
     and gen2Cached.extra.left.generation, 1,
   "generated harmony cache is pinned to the Gen1 decoder")
+local generatedDrum = gen1Cached and gen1Cached.chip
+  and gen1Cached.chip.drums and gen1Cached.chip.drums[1]
+T.eq(generatedDrum and #generatedDrum, 2,
+  "long source drum segments are split only at ChipAsm's 16-frame limit")
+T.eq(generatedDrum and generatedDrum[#generatedDrum]
+    and generatedDrum[#generatedDrum].endSample, 19 * 735,
+  "generated drum segments preserve the source envelope duration")
 
 if gen2Cached then
   local timingEngine = originalNewEngine(Data, gen2Cached, { allowLoops = true })

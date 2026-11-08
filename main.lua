@@ -71,15 +71,18 @@ return function(mod)
     return 1
   end
 
-  -- Convert an engine drum segment list (sample ticks) into ChipAsm drum rows
-  -- (frames of 1-16 at 256 ticks each).
-  local function drumRows(segments, frameTicks)
+  -- Convert engine sample positions into ChipAsm drum rows (frames of 1-16).
+  local TICKS_PER_SECOND = 15360
+  local function drumRows(segments, frameTicks, sampleRate)
     frameTicks = frameTicks or 256
+    sampleRate = sampleRate or 44100
     local rows = {}
     for _, segment in ipairs(segments or {}) do
       local startSample = segment.startSample or 0
       local endSample = segment.endSample or startSample
-      local frames = math.floor((endSample - startSample) / frameTicks + 0.5)
+      local durationTicks = (endSample - startSample)
+        * TICKS_PER_SECOND / sampleRate
+      local frames = math.floor(durationTicks / frameTicks + 0.5)
       if frames < 1 then frames = 1 end
       while frames > 0 do
         local chunk = math.min(frames, 16)
@@ -215,7 +218,8 @@ return function(mod)
             if not drumId then
               drumId = #src.drums + 1
               if drumId > 255 then drumId = 255 end
-              src.drums[drumId] = drumRows(event.drum, channel.frameTicks)
+              src.drums[drumId] = drumRows(
+                event.drum, channel.frameTicks, ChipSynth.SAMPLE_RATE)
               drumIds[event.drum] = drumId
             end
             program[#program + 1] = { drum = drumId, len = length }
