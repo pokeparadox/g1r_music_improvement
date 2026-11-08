@@ -120,8 +120,11 @@ end
 
 local function transposeProgram(program, semitones)
   local out = {}
+  local indexMap = {}
+  local loopTargets = {}
   local octave = 4
-  for _, event in ipairs(program or {}) do
+  for index, event in ipairs(program or {}) do
+    indexMap[index] = #out + 1
     local kind = eventKind(event)
     if kind == "octave" then
       octave = event.octave or octave
@@ -148,10 +151,29 @@ local function transposeProgram(program, semitones)
         out[#out+1] = clone
       end
     else
-      out[#out+1] = cloneEvent(event)
+      local clone = cloneEvent(event)
+      out[#out+1] = clone
+      if clone.loop and type(clone.loop.to) == "number" then
+        loopTargets[#loopTargets + 1] = {
+          loop = clone.loop,
+          target = clone.loop.to,
+        }
+      end
     end
   end
+  for _, target in ipairs(loopTargets) do
+    target.loop.to = indexMap[target.target] or target.target
+  end
   return out
+end
+
+local function prependProgramEvent(program, event)
+  for _, item in ipairs(program) do
+    if item.loop and type(item.loop.to) == "number" then
+      item.loop.to = item.loop.to + 1
+    end
+  end
+  table.insert(program, 1, event)
 end
 
 local function leadChannel(spec)
@@ -208,7 +230,9 @@ local function voiceSpec(program, semitones, volume, duty, subroutines)
         if ev.notetype then hasNoteType = true break end
       end
       if not hasNoteType then
-        table.insert(base, 1, { notetype = { speed = 12, volume = volume, fade = 1 } })
+        prependProgramEvent(base, {
+          notetype = { speed = 12, volume = volume, fade = 1 },
+        })
       else
         for _, ev in ipairs(base) do
           if ev.notetype and ev.notetype.volume then
@@ -222,7 +246,7 @@ local function voiceSpec(program, semitones, volume, duty, subroutines)
         if ev.duty ~= nil then hasDuty = true break end
       end
       if not hasDuty then
-        table.insert(base, 1, { duty = duty or 1 })
+        prependProgramEvent(base, { duty = duty or 1 })
       end
       return base
     end)(),
@@ -261,7 +285,9 @@ local function extra(source, settings)
         local hasNoteType = false
         for _, ev in ipairs(base) do if ev.notetype then hasNoteType = true break end end
         if not hasNoteType then
-          table.insert(base, 1, { notetype = { speed = 12, volume = bassVolume, fade = 1 } })
+          prependProgramEvent(base, {
+            notetype = { speed = 12, volume = bassVolume, fade = 1 },
+          })
         else
           for _, ev in ipairs(base) do
             if ev.notetype and ev.notetype.volume then
@@ -271,7 +297,7 @@ local function extra(source, settings)
         end
         local hasDuty = false
         for _, ev in ipairs(base) do if ev.duty ~= nil then hasDuty = true break end end
-        if not hasDuty then table.insert(base, 1, { duty = 1 }) end
+        if not hasDuty then prependProgramEvent(base, { duty = 1 }) end
         return { hw = 1, program = base }
       end)() } }
   end

@@ -33,21 +33,53 @@ local originalNewEngine = ChipSynth.newEngine
 local gen2HeaderSeen
 local gen1HeaderSeen
 local function mockEngine()
-  local engine = { tempo = 0x100, channels = {} }
+  local engine = { tempo = 0x100, generation = 1, channels = {} }
   local channel = {
     engine = engine,
     hardware = 1,
     speed = 12,
+    volume = 8,
+    fade = 0,
     timeTicks = 0,
     ended = false,
+    address = 0x100,
+    eventIndex = 0,
   }
+  local loopBytes = {
+    [0x200] = 0xFE,
+    [0x201] = 0,
+    [0x202] = 0x02,
+    [0x203] = 0x01,
+  }
+  function channel:byte()
+    local value = loopBytes[self.address] or 0
+    self.address = self.address + 1
+    return value
+  end
+  function channel:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
   function channel:frequency(note, octave)
     return 1000 + note * 2 + octave
   end
   function channel:nextEvent()
-    if self.emitted then return nil end
-    self.emitted = true
-    self.timeTicks = 12 * 0x100
+    self.eventIndex = self.eventIndex + 1
+    local events = {
+      { address = 0x100, speed = 12, ticks = 12 * 0x100 },
+      { address = 0x101, speed = 6, ticks = 6 * 0x100, silence = true },
+      { address = 0x102, speed = 6, ticks = 6 * 0x100 },
+    }
+    local event = events[self.eventIndex]
+    if not event then
+      self.ended = true
+      self.address = 0x204
+      return nil
+    end
+    self.address = event.address + 1
+    self.speed = event.speed
+    self.timeTicks = self.timeTicks + event.ticks
+    if event.silence then return { silence = true } end
     return { register = 1000, volume = 8, fade = 0, duty = 1 }
   end
   engine.channels[1] = channel
@@ -140,6 +172,43 @@ T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
 T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
     and gen2Cached.extra.left.generation, 1,
   "generated harmony cache is pinned to the Gen1 decoder")
+
+if gen2Cached then
+  local timingEngine = originalNewEngine(Data, gen2Cached, { allowLoops = true })
+  local timingChannel = timingEngine.channels[1]
+  local timing = {}
+  for index = 1, 5 do
+    local event = timingChannel:nextEvent()
+    T.check(event ~= nil, "generated speed-change test event " .. index .. " exists")
+    timing[index] = timingChannel.timeTicks
+  end
+  T.eq(timing[1], 12 * 0x100, "first generated note keeps its source duration")
+  T.eq(timing[2], 18 * 0x100, "speed changes are applied to source rests")
+  T.eq(timing[3], 24 * 0x100, "speed changes are emitted despite unchanged volume")
+  T.eq(timing[4], 30 * 0x100, "generated loop starts at the source loop target")
+  T.eq(timing[5], 36 * 0x100, "source loop body repeats at its own duration")
+end
+
+local improvement = assert(loadfile("mods/g1r_music_improvement/improve.lua"))()
+local loopedExtra = improvement.extra({
+  tempo = 0x100,
+  channels = {{
+    hw = 1,
+    program = {
+      { pitch = 0, len = 2 },
+      { pitch = 1, len = 3 },
+      { loop = { count = 0, to = 2 } },
+    },
+  }},
+}, {})
+local extraProgram = loopedExtra.left.channels[1].program
+local extraLoop
+for _, event in ipairs(extraProgram) do
+  if event.loop then extraLoop = event.loop break end
+end
+T.eq(extraLoop and extraProgram[extraLoop.to]
+    and extraProgram[extraLoop.to].octave, 6,
+  "transposed harmony loops follow inserted octave and instrument events")
 
 -- ------- regeneration uses only the scoped mod cache API
 

@@ -21,9 +21,13 @@ return function()
     musicVolume = 1.0,
     chunk = 512,
     lpfAlpha = 0.04,
-    baseStart = 0,
+    baseElapsed = 0,
+    baseLastClock = 0,
+    baseWasPlaying = false,
     extraRendered = 0,
     lead = 8192,
+    pendingBuffer = nil,
+    pendingSamples = 0,
   }
 
   local function isPlaying(src)
@@ -37,12 +41,54 @@ return function()
     state.source = nil
     state.engines = {}
     state.extraRendered = 0
-    state.baseStart = 0
+    state.baseElapsed = 0
+    state.baseLastClock = 0
+    state.baseWasPlaying = false
+    state.pendingBuffer = nil
+    state.pendingSamples = 0
+  end
+
+  local function currentBaseSource()
+    if okCA and type(ChipAudio.currentSource) == "function" then
+      local ok, source = pcall(ChipAudio.currentSource)
+      if ok then return source end
+    end
+    return nil
+  end
+
+  local function basePositionSamples(source)
+    if not source or type(source.tell) ~= "function" then return nil end
+    local ok, samples = pcall(source.tell, source, "samples")
+    if ok and type(samples) == "number" and samples >= 0 then
+      return samples
+    end
+    local okSeconds, seconds = pcall(source.tell, source)
+    if okSeconds and type(seconds) == "number" and seconds >= 0 then
+      return seconds * SAMPLE_RATE
+    end
+    return nil
+  end
+
+  local function queuePending()
+    if not state.source or not state.pendingBuffer then return false end
+    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
+    if not okFree or type(free) ~= "number" or free < 1 then return false end
+    local okQueue, result =
+      pcall(state.source.queue, state.source, state.pendingBuffer)
+    if not okQueue or result == false then return false end
+    state.pendingBuffer = nil
+    state.extraRendered = state.extraRendered + state.pendingSamples
+    state.pendingSamples = 0
+    return true
   end
 
   local function renderChunk()
     if not state.source then return false end
     if next(state.engines) == nil then return false end
+
+    if state.pendingBuffer then return queuePending() end
+    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
+    if not okFree or type(free) ~= "number" or free < 1 then return false end
 
     local chunk = state.chunk
     local leftMix = {}
@@ -130,15 +176,12 @@ return function()
         end
       end
     end
-    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
-    if okFree and type(free) == "number" and free >= 1 then
-      pcall(state.source.queue, state.source, out)
-    end
-    state.extraRendered = state.extraRendered + chunk
-    return true
+    state.pendingBuffer = out
+    state.pendingSamples = chunk
+    return queuePending()
   end
 
-  local function start(song, data)
+  local function start(song, data, basePlayClock, looping)
     stop()
     if type(song) ~= "table" then return end
     state.data = data
@@ -168,50 +211,53 @@ return function()
     state.source = src
     state.channels = channels
     state.lpfState = 0
-    local baseSrc = nil
-    if okCA and type(ChipAudio.currentSource) == "function" then
-      local ok, s = pcall(ChipAudio.currentSource)
-      if ok then baseSrc = s end
+    state.lead = (looping == false) and 2048 or 8192
+    local startedAt = clock()
+    local baseSrc = currentBaseSource()
+    local played = basePositionSamples(baseSrc)
+    if played ~= nil then
+      state.baseElapsed = played
+    elseif type(basePlayClock) == "number" then
+      state.baseElapsed = math.max(0, (startedAt - basePlayClock) * SAMPLE_RATE)
+    else
+      state.baseElapsed = 0
     end
-    local played = 0
-    if baseSrc then
-      local okT, t = pcall(baseSrc.tell, baseSrc, "samples")
-      if not (okT and type(t) == "number") then
-        local okT2, t2 = pcall(baseSrc.tell, baseSrc)
-        if okT2 and type(t2) == "number" then
-          t = t2 * SAMPLE_RATE
-          okT = true
-        end
+    -- Align generated harmony to the base source's playback position when
+    -- available; the clock estimate is only a fallback for new sources.
+    local skip = math.floor(state.baseElapsed)
+    for _, engine in pairs(state.engines) do
+      local remaining = skip
+      while remaining > 0 do
+        local n = math.min(state.chunk, remaining)
+        pcall(ChipSynth.soundData, engine, n, 1)
+        remaining = remaining - n
       end
-      if okT and type(t) == "number" then played = t end
     end
-    state.baseStart = clock() - (played / SAMPLE_RATE)
-    state.extraRendered = 0
+    state.extraRendered = skip
+    state.baseLastClock = startedAt
+    local baseSrc = currentBaseSource()
+    state.baseWasPlaying = isPlaying(baseSrc)
   end
 
   local function update()
     if not state.source then return end
-    local baseSrc = nil
-    if okCA and type(ChipAudio.currentSource) == "function" then
-      local ok, src = pcall(ChipAudio.currentSource)
-      if ok then baseSrc = src end
+    local now = clock()
+    if state.baseWasPlaying then
+      local elapsed = now - state.baseLastClock
+      if elapsed > 0 then state.baseElapsed = state.baseElapsed + elapsed * SAMPLE_RATE end
     end
-    local basePlaying = false
-    if baseSrc then
-      local ok, playing = pcall(baseSrc.isPlaying, baseSrc)
-      if ok then basePlaying = playing end
-    end
+    state.baseLastClock = now
+    local baseSrc = currentBaseSource()
+    local basePlaying = isPlaying(baseSrc)
     if basePlaying and not isPlaying(state.source) then
       pcall(state.source.play, state.source)
     elseif (not basePlaying) and isPlaying(state.source) then
       pcall(state.source.pause, state.source)
     end
+    state.baseWasPlaying = basePlaying
 
     if basePlaying then
-      local now = clock()
-      local baseElapsed = (now - state.baseStart) * SAMPLE_RATE
-      if baseElapsed < 0 then baseElapsed = 0 end
-      local target = baseElapsed + state.lead
+      local target = state.baseElapsed + state.lead
       local guard = 0
       while state.extraRendered < target and guard < 64 do
         guard = guard + 1
