@@ -6,7 +6,7 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local T = require("tests.modkit")
 local Runtime = require("src.mods.Runtime")
-local Data = T.fixtures.load()
+local Data = T.fixtures.fresh()
 Data.audio = Data.audio or {}
 Data.audio.songs = {}
 Data.audio.gen2 = true
@@ -16,6 +16,10 @@ Data.audio.songs[gen2SongId] = {
   address = gen2Address,
   bank = gen2Bank,
 }
+
+local CoreData = require("src.core.Data")
+local previousAudio = CoreData.audio
+CoreData.audio = Data.audio
 
 local ChipSynth = require("src.core.ChipSynth")
 local originalNewEngine = ChipSynth.newEngine
@@ -47,7 +51,14 @@ ChipSynth.newEngine = function(data, header, options)
   return originalNewEngine(data, header, options)
 end
 
-local run = T.sdk.loadMod("mods/g1r_music_improvement", { data = Data })
+local GameVersion = require("src.core.GameVersion")
+local previousVersion = GameVersion.get()
+GameVersion.set("gold")
+local Version = require("src.core.Version")
+local previousModApi = Version.modApi
+Version.modApi = math.max(Version.modApi or 0, 3)
+
+local run = T.sdk.loadMod("mods/g1r_music_improvement", { data = Data, generation = 2 })
 T.check(#run.errors == 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
 local musicMod = run.mods.g1r_music_improvement
 if musicMod and musicMod.exports then
@@ -62,7 +73,7 @@ local exports = musicMod and musicMod.exports
 
 T.eq(gen2HeaderSeen and gen2HeaderSeen.engine, "gen2",
   "Gen2 engine selector reaches ChipSynth")
-local gen2CachePath = "songs/" .. tostring(musicMod and musicMod.manifest
+local gen2CachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
   and musicMod.manifest.version or "0")
   .. "_true_Music_Gen2CacheTest.lua"
 local gen2Bytes = cache and cache:read(gen2CachePath)
@@ -89,20 +100,8 @@ T.check(cache and type(cache.info) == "function"
     and type(cache.write) == "function",
   "mod cache exposes info, delete, and write")
 if cache and exports and type(cache.delete) == "function" then
-  local legacyId
-  for id in pairs(Data.audio and Data.audio.songs or {}) do
-    if not tostring(id):match("^Music_Improved") then
-      legacyId = id
-      break
-    end
-  end
-  local legacyPath
-  if legacyId then
-    legacyPath = "songs/0.4.6_true_"
-      .. tostring(legacyId):gsub("[^%w_]", "_") .. ".lua"
-    cache:write(legacyPath, "legacy cache")
-    cache:write("songs/index.txt", "")
-  end
+  local foreignPath = "songs/crystal_0.4.6_true_Music_Foreign.lua"
+  cache:write(foreignPath, "foreign cache")
 
   local deleted = {}
   local originalDelete = cache.delete
@@ -116,19 +115,18 @@ if cache and exports and type(cache.delete) == "function" then
   local deletedIndex = false
   local onlySongCache = true
   for _, path in ipairs(deleted) do
-    if path == "songs/index.txt" then deletedIndex = true end
-    if path:sub(1, 6) ~= "songs/" then onlySongCache = false end
+    if path == "songs/gold_index.txt" then deletedIndex = true end
+    if path:sub(1, 11) ~= "songs/gold_" then onlySongCache = false end
   end
   T.check(deletedIndex, "regeneration deletes its generated-file index")
   T.check(#deleted > 0, "regeneration deletes cached songs through mod.cache")
   T.check(onlySongCache, "regeneration leaves unrelated cache namespaces untouched")
-  if legacyPath then
-    local deletedLegacy = false
-    for _, path in ipairs(deleted) do
-      if path == legacyPath then deletedLegacy = true end
-    end
-    T.check(deletedLegacy, "regeneration deletes known legacy cache filenames")
+  local deletedForeign = false
+  for _, path in ipairs(deleted) do
+    if path == foreignPath then deletedForeign = true end
   end
+  T.check(not deletedForeign, "regeneration never deletes another game's cache")
+  T.eq(cache:read(foreignPath), "foreign cache", "foreign cache survives regeneration")
   exports.prepareAll()
 end
 
@@ -165,9 +163,9 @@ T.eq(optionRows[4] and optionRows[4].musicImprovementId, "music_improvement_rege
   "cache regeneration is reachable from the visible options group")
 
 if cache and exports and type(cache.delete) == "function" then
-  local failurePath = "songs/test_delete_failure.lua"
+  local failurePath = "songs/gold_test_delete_failure.lua"
   cache:write(failurePath, "generated cache")
-  cache:write("songs/index.txt", failurePath .. "\n")
+  cache:write("songs/gold_index.txt", failurePath .. "\n")
   local originalDelete = cache.delete
   cache.delete = function() return false end
   local game = {
@@ -180,5 +178,8 @@ if cache and exports and type(cache.delete) == "function" then
 end
 
 ChipSynth.newEngine = originalNewEngine
+CoreData.audio = previousAudio
+Version.modApi = previousModApi
+GameVersion.set(previousVersion)
 run.release()
 T.finish("g1r_music_improvement")

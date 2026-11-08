@@ -9,6 +9,7 @@ return function(mod)
   local okChipAudio, ChipAudio = pcall(require, "src.core.ChipAudio")
   local okData, Data = pcall(require, "src.core.Data")
   local okMusic, Music = pcall(require, "src.core.Music")
+  local okGameVersion, GameVersion = pcall(require, "src.core.GameVersion")
 
   local function loadModFile(name)
     local source = mod:read(name)
@@ -346,22 +347,40 @@ return function(mod)
     return (mod.manifest.version or "0") .. "_" .. tostring(s.enabled)
   end
 
-  local function cachePath(id, hash)
-    local safeId = tostring(id):gsub("[^%w_]", "_")
-    return "songs/" .. hash .. "_" .. safeId .. ".lua"
+  -- Caches must never cross game versions: Red/Blue/Yellow and every Gen2
+  -- game reuse song IDs but can have different source bytecode.
+  local function cacheGameId(game)
+    local version = game and game.save and game.save.version
+    if type(version) ~= "string" or version == "" then
+      version = okGameVersion and GameVersion and GameVersion.get and GameVersion.get()
+    end
+    version = tostring(version or "unknown"):lower():gsub("[^%w_]", "_")
+    return version ~= "" and version or "unknown"
   end
 
-  local cacheIndexPath = "songs/index.txt"
+  local activeCacheGame = cacheGameId(nil)
+
+  local function cachePath(id, hash)
+    local safeId = tostring(id):gsub("[^%w_]", "_")
+    return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeId .. ".lua"
+  end
+
+  local function cacheIndexFor(gameId)
+    return "songs/" .. gameId .. "_index.txt"
+  end
+
+  local cacheIndexPath = cacheIndexFor(activeCacheGame)
   local cacheIndexPaths = {}
   local cacheIndexSet = {}
   local cacheIndexReady = false
 
   local function isGeneratedCachePath(path)
-    if type(path) ~= "string" or path:sub(1, 6) ~= "songs/"
+    local prefix = "songs/" .. activeCacheGame .. "_"
+    if type(path) ~= "string" or path:sub(1, #prefix) ~= prefix
         or path == cacheIndexPath then
       return false
     end
-    local filename = path:sub(7)
+    local filename = path:sub(#prefix + 1)
     return filename ~= "" and not filename:find("[/\\]")
       and not filename:find("[%z\1-\31]")
       and filename:match("%.lua$") ~= nil
@@ -496,7 +515,14 @@ return function(mod)
     return nil
   end
 
-  local function buildQueue(settings, force)
+  local function buildQueue(settings, force, game)
+    local gameId = cacheGameId(game)
+    if activeCacheGame ~= gameId then
+      activeCacheGame = gameId
+      cacheIndexPath = cacheIndexFor(gameId)
+      cacheIndexPaths, cacheIndexSet = {}, {}
+      cacheIndexReady = false
+    end
     queue = {}
     originalDefs = {}
     improvedMap = {}
@@ -534,15 +560,14 @@ return function(mod)
             end
             improvedMap[id] = improvedId
             extraDefs[improvedId] = cachedDef.extra
-            completed = completed + 1
           else
             queue[#queue + 1] = id
           end
-          total = total + 1
         end
       end
     end
-    state.pending = (#queue > 0)
+    total = #queue
+    state.pending = total > 0
   end
 
   buildQueue(settings, false)
@@ -574,36 +599,6 @@ return function(mod)
       if not deleteCacheFile(path) then return false end
     end
 
-    local ids = {}
-    if okData and type(Data) == "table" and type(Data.audio) == "table"
-        and type(Data.audio.songs) == "table" then
-      for id in pairs(Data.audio.songs) do
-        if not tostring(id):match("^Music_Improved") then
-          ids[#ids + 1] = id
-        end
-      end
-    end
-    table.sort(ids)
-
-    local legacyVersions = { "0.4.6", tostring(mod.manifest.version or "0") }
-    local legacySeen = {}
-    for _, version in ipairs(legacyVersions) do
-      if not legacySeen[version] then
-        legacySeen[version] = true
-        for _, id in ipairs(ids) do
-          local path = cachePath(id, version .. "_true")
-          if not isGeneratedCachePath(path) then
-            mod.log:error("music_improvement: refusing to delete invalid legacy cache path %s",
-              path)
-            return false
-          end
-          if not indexedSet[path] and not deleteCacheFile(path) then
-            return false
-          end
-        end
-      end
-    end
-
     if not deleteCacheFile(cacheIndexPath) then return false end
     cacheIndexPaths, cacheIndexSet = {}, {}
     cacheIndexReady = true
@@ -627,7 +622,7 @@ return function(mod)
     state.confirmPushed = true
     state.progressPushed = false
     state.progressInstance = nil
-    buildQueue(settings, true)
+    buildQueue(settings, true, game)
     if startPreparation then startPreparation(game) end
   end
 
@@ -940,7 +935,7 @@ return function(mod)
     if type(game) ~= "table" then return end
     readyGame = game
     settings = currentSettings()
-    buildQueue(settings, false)
+    buildQueue(settings, false, game)
     if type(game.update) ~= "function" or game._g1rMusicImprovementUpdateWrapped then
       return
     end
@@ -956,9 +951,14 @@ return function(mod)
         end
       end
       pcall(applyChannelMix)
+      if state.pending and not state.confirmed and not state.skipped
+          and not state.confirmPushed and self.stack then
+        state.confirmPushed = true
+        state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
+      end
       return nextUpdate(self, dt)
     end
   end)
 
-  mod.log:info("music_improvement: %d cached, %d pending", completed, #queue)
+  mod.log:info("music_improvement: %d songs pending", #queue)
 end
