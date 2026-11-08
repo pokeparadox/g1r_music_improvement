@@ -9,6 +9,7 @@ return function(mod)
   local okChipAudio, ChipAudio = pcall(require, "src.core.ChipAudio")
   local okData, Data = pcall(require, "src.core.Data")
   local okMusic, Music = pcall(require, "src.core.Music")
+  local okGameVersion, GameVersion = pcall(require, "src.core.GameVersion")
 
   local function loadModFile(name)
     local source = mod:read(name)
@@ -321,7 +322,10 @@ return function(mod)
 
   local settings = currentSettings()
   local improvedMap = {}
+  local stagedImprovedMap = {}
   local currentImproved = false
+  local currentSong
+  local currentReason
   local originalDefs = {}
   local queue = {}
   local total = 0
@@ -342,26 +346,62 @@ return function(mod)
     return "Music_Improved" .. tostring(name):gsub("^Music_", "")
   end
 
+  -- Content registries freeze at the loader's merge boundary.  Songs built
+  -- after that (first cache fill, regeneration) must still reach the live
+  -- Data table or every mapped cue resolves to a missing def.
+  local function registerImproved(id, def)
+    local improvedId = improvedIdFor(id)
+    local okReg = pcall(mod.content.music.register, mod.content.music, improvedId, def)
+    if not okReg then
+      pcall(mod.content.music.override, mod.content.music, improvedId, def)
+    end
+    -- after the merge boundary both registry writes raise, so keep the live
+    -- table authoritative for playback and the music test list.
+    if okData and type(Data) == "table" and type(Data.audio) == "table"
+        and type(Data.audio.songs) == "table" then
+      Data.audio.songs[improvedId] = def
+    end
+    return improvedId
+  end
+
   local function settingsHash(s)
     return (mod.manifest.version or "0") .. "_" .. tostring(s.enabled)
   end
 
-  local function cachePath(id, hash)
-    local safeId = tostring(id):gsub("[^%w_]", "_")
-    return "songs/" .. hash .. "_" .. safeId .. ".lua"
+  -- Caches must never cross game versions: Red/Blue/Yellow and every Gen2
+  -- game reuse song IDs but can have different source bytecode.
+  local function cacheGameId(game)
+    local version = game and game.save and game.save.version
+    if type(version) ~= "string" or version == "" then
+      version = okGameVersion and GameVersion and GameVersion.get and GameVersion.get()
+    end
+    version = tostring(version or "unknown"):lower():gsub("[^%w_]", "_")
+    return version ~= "" and version or "unknown"
   end
 
-  local cacheIndexPath = "songs/index.txt"
+  local activeCacheGame = cacheGameId(nil)
+
+  local function cachePath(id, hash)
+    local safeId = tostring(id):gsub("[^%w_]", "_")
+    return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeId .. ".lua"
+  end
+
+  local function cacheIndexFor(gameId)
+    return "songs/" .. gameId .. "_index.txt"
+  end
+
+  local cacheIndexPath = cacheIndexFor(activeCacheGame)
   local cacheIndexPaths = {}
   local cacheIndexSet = {}
   local cacheIndexReady = false
 
   local function isGeneratedCachePath(path)
-    if type(path) ~= "string" or path:sub(1, 6) ~= "songs/"
+    local prefix = "songs/" .. activeCacheGame .. "_"
+    if type(path) ~= "string" or path:sub(1, #prefix) ~= prefix
         or path == cacheIndexPath then
       return false
     end
-    local filename = path:sub(7)
+    local filename = path:sub(#prefix + 1)
     return filename ~= "" and not filename:find("[/\\]")
       and not filename:find("[%z\1-\31]")
       and filename:match("%.lua$") ~= nil
@@ -491,15 +531,39 @@ return function(mod)
     if not chunk then return nil end
     local ok, def = pcall(chunk)
     if ok and type(def) == "table" and type(def.chip) == "table" then
-      return def
+      local valid, engine = pcall(ChipSynth.newEngine, Data, def, { allowLoops = true })
+      if valid and type(engine) == "table" then return def end
+      mod.log:warn("music_improvement: invalid cached song %s: %s", path, tostring(engine))
     end
     return nil
   end
 
-  local function buildQueue(settings, force)
+  local function publishImprovedMap()
+    improvedMap = stagedImprovedMap
+    local song = currentSong
+    if not song or tostring(song):match("^Music_Improved")
+        or currentReason == "jukebox" or state.skipped
+        or mod.options:get("enabled") == false
+        or not okMusic or not okData then
+      return
+    end
+    if not improvedMap[song] then return end
+    local loop = currentReason ~= "once" and currentReason ~= "victory" or false
+    pcall(Music.play, Data, song, loop, { reason = currentReason or "map" })
+  end
+
+  local function buildQueue(settings, force, game)
+    local gameId = cacheGameId(game)
+    if activeCacheGame ~= gameId then
+      activeCacheGame = gameId
+      cacheIndexPath = cacheIndexFor(gameId)
+      cacheIndexPaths, cacheIndexSet = {}, {}
+      cacheIndexReady = false
+    end
     queue = {}
     originalDefs = {}
     improvedMap = {}
+    stagedImprovedMap = {}
     extraDefs = {}
     completed = 0
     total = 0
@@ -527,22 +591,18 @@ return function(mod)
           end
           if cachedDef then
             indexGeneratedCachePath(cachePath(id, hash))
-            local improvedId = improvedIdFor(id)
-            local okReg = pcall(mod.content.music.register, mod.content.music, improvedId, cachedDef)
-            if not okReg then
-              pcall(mod.content.music.override, mod.content.music, improvedId, cachedDef)
-            end
-            improvedMap[id] = improvedId
+            local improvedId = registerImproved(id, cachedDef)
+            stagedImprovedMap[id] = improvedId
             extraDefs[improvedId] = cachedDef.extra
-            completed = completed + 1
           else
             queue[#queue + 1] = id
           end
-          total = total + 1
         end
       end
     end
-    state.pending = (#queue > 0)
+    total = #queue
+    state.pending = total > 0
+    if not state.pending then publishImprovedMap() end
   end
 
   buildQueue(settings, false)
@@ -574,36 +634,6 @@ return function(mod)
       if not deleteCacheFile(path) then return false end
     end
 
-    local ids = {}
-    if okData and type(Data) == "table" and type(Data.audio) == "table"
-        and type(Data.audio.songs) == "table" then
-      for id in pairs(Data.audio.songs) do
-        if not tostring(id):match("^Music_Improved") then
-          ids[#ids + 1] = id
-        end
-      end
-    end
-    table.sort(ids)
-
-    local legacyVersions = { "0.4.6", tostring(mod.manifest.version or "0") }
-    local legacySeen = {}
-    for _, version in ipairs(legacyVersions) do
-      if not legacySeen[version] then
-        legacySeen[version] = true
-        for _, id in ipairs(ids) do
-          local path = cachePath(id, version .. "_true")
-          if not isGeneratedCachePath(path) then
-            mod.log:error("music_improvement: refusing to delete invalid legacy cache path %s",
-              path)
-            return false
-          end
-          if not indexedSet[path] and not deleteCacheFile(path) then
-            return false
-          end
-        end
-      end
-    end
-
     if not deleteCacheFile(cacheIndexPath) then return false end
     cacheIndexPaths, cacheIndexSet = {}, {}
     cacheIndexReady = true
@@ -627,7 +657,7 @@ return function(mod)
     state.confirmPushed = true
     state.progressPushed = false
     state.progressInstance = nil
-    buildQueue(settings, true)
+    buildQueue(settings, true, game)
     if startPreparation then startPreparation(game) end
   end
 
@@ -647,16 +677,21 @@ return function(mod)
         mod.log:warn("music_improvement: skipping %s (missing ROM address/bank)", tostring(id))
       end
       if translated then
+        local okDef, defErr = pcall(ChipSynth.newEngine, Data, translated,
+          { allowLoops = true })
+        if not okDef or type(defErr) ~= "table" then
+          mod.log:warn("music_improvement: generated song invalid for %s: %s",
+            tostring(id), tostring(defErr))
+          translated = nil
+        end
+      end
+      if translated then
         if translated.extra then
           extraDefs[id] = translated.extra
           extraDefs[improvedIdFor(id)] = translated.extra
         end
-        local improvedId = improvedIdFor(id)
-        local okReg = pcall(mod.content.music.register, mod.content.music, improvedId, translated)
-        if not okReg then
-          pcall(mod.content.music.override, mod.content.music, improvedId, translated)
-        end
-        improvedMap[id] = improvedId
+        local improvedId = registerImproved(id, translated)
+        stagedImprovedMap[id] = improvedId
         local hash = settingsHash(settings)
         if serialize then
           local okSer, bytes = pcall(serialize, translated)
@@ -691,6 +726,7 @@ return function(mod)
     end
     if #queue == 0 then
       state.pending = false
+      publishImprovedMap()
       if state.progressInstance and game and game.stack then
         pcall(game.stack.pop, game.stack)
         state.progressInstance = nil
@@ -704,6 +740,7 @@ return function(mod)
       prepareOne(nil)
     end
     state.pending = false
+    publishImprovedMap()
   end
 
   mod.exports = mod.exports or {}
@@ -768,12 +805,29 @@ return function(mod)
     end,
   })
 
+  -- Registrations made after the merge boundary are not in the frozen
+  -- registry snapshot the test harness exposes, so merge both views.
+  local function musicIds(game)
+    local ids, seen = {}, {}
+    for id in mod.content.music:each() do
+      if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
+    local songs = game and game.data and game.data.audio
+      and game.data.audio.songs
+    if type(songs) == "table" then
+      for id in pairs(songs) do
+        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+      end
+    end
+    table.sort(ids)
+    return ids
+  end
+  mod.exports.musicIds = musicIds
+
   -- jukebox screen
   mod.content.screens:register("MusicImprovementJukebox", {
     new = function(game)
-      local ids = {}
-      for id in mod.content.music:each() do ids[#ids + 1] = id end
-      table.sort(ids)
+      local ids = musicIds(game)
       local items = {}
       for _, id in ipairs(ids) do
         items[#items + 1] = { label = id:gsub("^Music_", ""), value = id }
@@ -781,7 +835,7 @@ return function(mod)
       local menu = mod.ui.ListMenu.new(game, "MUSIC TEST", items, {
         onChoose = function(item)
           require("src.core.Music").play(game.data, item.value, true,
-            { reason = "direct" })
+            { reason = "jukebox" })
         end,
         onCancel = function()
           require("src.core.Music").stop()
@@ -789,7 +843,7 @@ return function(mod)
       })
       if items[1] and mod.options:get("enabled") ~= false and not state.skipped then
         require("src.core.Music").play(game.data, items[1].value, true,
-          { reason = "direct" })
+          { reason = "jukebox" })
       end
       return menu
     end,
@@ -864,7 +918,9 @@ return function(mod)
     if state.skipped then
       return next(chosen, ctx)
     end
-    if not ctx or ctx.reason == "direct" then
+    -- Core uses "direct" for calls with no context too (title, intro, menus),
+    -- so only the jukebox opts out of enhancement explicitly.
+    if not ctx or ctx.reason == "jukebox" then
       return next(chosen, ctx)
     end
     local improved = improvedMap[chosen]
@@ -889,7 +945,40 @@ return function(mod)
     end
   end
 
-  -- realtime extra harmony stream
+  -- Realtime harmony must not allocate/render until threaded base audio starts.
+  local pendingExtra
+
+  -- Base audio starts inside ChipAudio.update, before game.update returns.
+  -- Start harmony in that same call so both streams begin at the same sample
+  -- instead of one frame late.
+  if okChipAudio and type(ChipAudio) == "table"
+      and type(ChipAudio.update) == "function"
+      and not ChipAudio._g1rUpdateWrapped then
+    ChipAudio._g1rUpdateWrapped = true
+    local baseChipUpdate = ChipAudio.update
+    ChipAudio.update = function(...)
+      local awaitingBefore = false
+      if type(ChipAudio.awaitingFirstBuffer) == "function" then
+        local ok, value = pcall(ChipAudio.awaitingFirstBuffer)
+        if ok then awaitingBefore = value == true end
+      end
+      local result = baseChipUpdate(...)
+      if pendingExtra and awaitingBefore
+          and type(ChipAudio.awaitingFirstBuffer) == "function" then
+        local ok, value = pcall(ChipAudio.awaitingFirstBuffer)
+        if ok and value ~= true then
+          local extra = pendingExtra
+          pendingExtra = nil
+          if extraAudio then
+            pcall(extraAudio.start, extra, Data)
+            pcall(extraAudio.update)
+          end
+        end
+      end
+      return result
+    end
+  end
+
   local function applyChannelMix()
     if not okChipAudio or type(ChipAudio) ~= "table" then return end
     local enhancementActive = mod.options:get("enabled") ~= false
@@ -899,20 +988,40 @@ return function(mod)
   end
   mod.events:on("music.started", function(payload)
     local song = payload and payload.song
+    currentSong = song
+    currentReason = payload and payload.reason
     currentImproved = (type(song) == "string" and song:match("^Music_Improved") ~= nil)
     if extraAudio then
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
       local enhancementActive = mod.options:get("enabled") ~= false
-        and not state.skipped and (not state.pending or state.confirmed)
+        and not state.skipped and not state.pending
       if extra and enhancementActive then
-        pcall(extraAudio.start, extra, Data)
+        local basePlaying = false
+        if okChipAudio and type(ChipAudio.currentSource) == "function" then
+          local okSource, source = pcall(ChipAudio.currentSource)
+          if okSource and source then
+            local okPlay, playing = pcall(source.isPlaying, source)
+            if okPlay then basePlaying = playing == true end
+          end
+        end
+        if basePlaying then
+          pcall(extraAudio.start, extra, Data)
+          pcall(extraAudio.update)
+        else
+          pendingExtra = extra
+        end
+      else
+        pendingExtra = nil
       end
     end
     pcall(applyChannelMix)
   end)
   mod.events:on("music.stopped", function()
     currentImproved = false
+    currentSong = nil
+    currentReason = nil
+    pendingExtra = nil
     if extraAudio then pcall(extraAudio.stop) end
     pcall(applyChannelMix)
   end)
@@ -940,25 +1049,43 @@ return function(mod)
     if type(game) ~= "table" then return end
     readyGame = game
     settings = currentSettings()
-    buildQueue(settings, false)
+    buildQueue(settings, false, game)
     if type(game.update) ~= "function" or game._g1rMusicImprovementUpdateWrapped then
       return
     end
     local nextUpdate = game.update
     game._g1rMusicImprovementUpdateWrapped = true
     game.update = function(self, dt)
+      pcall(applyChannelMix)
+      if state.pending and not state.confirmed and not state.skipped
+          and not state.confirmPushed and self.stack then
+        state.confirmPushed = true
+        state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
+      end
+      local result = nextUpdate(self, dt)
+      -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
+      -- Start harmony after it, in the same frame, instead of one frame late.
       if extraAudio then
         if mod.options:get("enabled") ~= false then
           pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
+          if pendingExtra and okChipAudio and type(ChipAudio.currentSource) == "function" then
+            local okSource, source = pcall(ChipAudio.currentSource)
+            local okPlaying, playing = okSource and source and pcall(source.isPlaying, source)
+            if okPlaying and playing then
+              local extra = pendingExtra
+              pendingExtra = nil
+              pcall(extraAudio.start, extra, Data)
+            end
+          end
           pcall(extraAudio.update)
         else
+          pendingExtra = nil
           pcall(extraAudio.stop)
         end
       end
-      pcall(applyChannelMix)
-      return nextUpdate(self, dt)
+      return result
     end
   end)
 
-  mod.log:info("music_improvement: %d cached, %d pending", completed, #queue)
+  mod.log:info("music_improvement: %d songs pending", #queue)
 end

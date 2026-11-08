@@ -154,13 +154,25 @@ local function transposeProgram(program, semitones)
   return out
 end
 
-local function leadProgram(spec)
+local function leadChannel(spec)
   for _, channel in ipairs(spec.channels or {}) do
-    if channel.hw == 1 and channel.program then return channel.program end
+    if channel.hw == 1 and channel.program then return channel end
   end
   if spec.channels and spec.channels[1] and spec.channels[1].program then
-    return spec.channels[1].program
+    return spec.channels[1]
   end
+  return nil
+end
+
+local function leadProgram(spec)
+  local ch = leadChannel(spec)
+  if ch then return ch.program end
+  return nil
+end
+
+local function leadSubroutines(spec)
+  local ch = leadChannel(spec)
+  if ch and type(ch.subroutines) == "table" then return ch.subroutines end
   return nil
 end
 
@@ -177,9 +189,17 @@ local function bassProgram(spec)
   return leadProgram(spec)
 end
 
-local function voiceSpec(program, semitones, volume, duty)
+local function voiceSpec(program, semitones, volume, duty, subroutines)
+  local subs = nil
+  if type(subroutines) == "table" then
+    subs = {}
+    for name, sub in pairs(subroutines) do
+      subs[name] = transposeProgram(sub, semitones)
+    end
+  end
   return {
     hw = 1,
+    subroutines = subs,
     program = (function()
       local base = transposeProgram(program, semitones)
       -- ensure quiet instrument: inject notetype at start if missing
@@ -217,12 +237,13 @@ local function extra(source, settings)
   if type(spec) == "table" and spec.chip then return nil end
   local program = leadProgram(spec)
   if not program then return nil end
+  local subs = leadSubroutines(spec)
   local volume = math.max(1, math.min(12, math.floor((settings.extraVolume or 1.0) * 12)))
   local tempo = spec.tempo or 0x100
   local fast = tempo < 224
   local out = {}
   local function add(side, interval, duty)
-    out[side] = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty) } }
+    out[side] = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs) } }
   end
   add("left", 12, 1)
   add("right", -12, 1)

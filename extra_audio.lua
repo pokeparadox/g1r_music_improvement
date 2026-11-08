@@ -4,15 +4,27 @@ return function()
   local okCA, ChipAudio = pcall(require, "src.core.ChipAudio")
   if not okCS or type(ChipSynth) ~= "table" then return nil end
 
-    local state = {
-      engines = {},
-      sideEnabled = { left = true, center = true, right = true },
-      source = nil,
-      extraGain = 0.35,
-      musicVolume = 1.0,
-      chunk = 512,
-      lpfAlpha = 0.04,
-    }
+  local SAMPLE_RATE = ChipSynth.SAMPLE_RATE or 44100
+  local function clock()
+    if love and love.timer and type(love.timer.getTime) == "function" then
+      local ok, t = pcall(love.timer.getTime)
+      if ok and type(t) == "number" then return t end
+    end
+    return os.clock()
+  end
+
+  local state = {
+    engines = {},
+    sideEnabled = { left = true, center = true, right = true },
+    source = nil,
+    extraGain = 0.35,
+    musicVolume = 1.0,
+    chunk = 512,
+    lpfAlpha = 0.04,
+    baseStart = 0,
+    extraRendered = 0,
+    lead = 8192,
+  }
 
   local function isPlaying(src)
     if not src then return false end
@@ -24,13 +36,12 @@ return function()
     if state.source then pcall(state.source.stop, state.source) end
     state.source = nil
     state.engines = {}
-
+    state.extraRendered = 0
+    state.baseStart = 0
   end
 
-  local function mixChunk()
+  local function renderChunk()
     if not state.source then return false end
-    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
-    if not okFree or type(free) ~= "number" or free < 1 then return false end
     if next(state.engines) == nil then return false end
 
     local chunk = state.chunk
@@ -119,8 +130,12 @@ return function()
         end
       end
     end
-    local okQ = pcall(state.source.queue, state.source, out)
-    return okQ
+    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
+    if okFree and type(free) == "number" and free >= 1 then
+      pcall(state.source.queue, state.source, out)
+    end
+    state.extraRendered = state.extraRendered + chunk
+    return true
   end
 
   local function start(song, data)
@@ -138,12 +153,12 @@ return function()
     if next(state.engines) == nil then return end
     local src = nil
     local channels = 2
-    local ok6, src6 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 6, 8)
+    local ok6, src6 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 6, 16)
     if ok6 and src6 then
       src = src6
       channels = 6
     else
-      local ok2, src2 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 2, 8)
+      local ok2, src2 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 2, 16)
       if ok2 and src2 then
         src = src2
         channels = 2
@@ -153,9 +168,25 @@ return function()
     state.source = src
     state.channels = channels
     state.lpfState = 0
-    for _ = 1, 4 do
-      if not mixChunk() then break end
+    local baseSrc = nil
+    if okCA and type(ChipAudio.currentSource) == "function" then
+      local ok, s = pcall(ChipAudio.currentSource)
+      if ok then baseSrc = s end
     end
+    local played = 0
+    if baseSrc then
+      local okT, t = pcall(baseSrc.tell, baseSrc, "samples")
+      if not (okT and type(t) == "number") then
+        local okT2, t2 = pcall(baseSrc.tell, baseSrc)
+        if okT2 and type(t2) == "number" then
+          t = t2 * SAMPLE_RATE
+          okT = true
+        end
+      end
+      if okT and type(t) == "number" then played = t end
+    end
+    state.baseStart = clock() - (played / SAMPLE_RATE)
+    state.extraRendered = 0
   end
 
   local function update()
@@ -175,8 +206,17 @@ return function()
     elseif (not basePlaying) and isPlaying(state.source) then
       pcall(state.source.pause, state.source)
     end
-    for _ = 1, 2 do
-      if not mixChunk() then break end
+
+    if basePlaying then
+      local now = clock()
+      local baseElapsed = (now - state.baseStart) * SAMPLE_RATE
+      if baseElapsed < 0 then baseElapsed = 0 end
+      local target = baseElapsed + state.lead
+      local guard = 0
+      while state.extraRendered < target and guard < 64 do
+        guard = guard + 1
+        if not renderChunk() then break end
+      end
     end
   end
 
