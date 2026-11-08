@@ -1031,12 +1031,15 @@ return function(mod)
         local ok, value = pcall(ChipAudio.awaitingFirstBuffer)
         if ok then awaitingBefore = value == true end
       end
-      if awaitingBefore then basePlayClock = g1rClock() end
       local result = baseChipUpdate(...)
       if pendingExtra and awaitingBefore
           and type(ChipAudio.awaitingFirstBuffer) == "function" then
         local ok, value = pcall(ChipAudio.awaitingFirstBuffer)
         if ok and value ~= true then
+          -- updateThreaded starts the base Source during baseChipUpdate.
+          -- Timestamp after it returns so the fallback cursor estimate does
+          -- not count worker-buffer queueing time before playback began.
+          basePlayClock = g1rClock()
           local extra = pendingExtra
           pendingExtra = nil
           if extraAudio then

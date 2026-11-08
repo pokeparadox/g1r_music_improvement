@@ -69,8 +69,9 @@ local factory = assert(loadfile("extra_audio.lua"))()
 local function newAudio()
   return factory()
 end
-local function newExtra(audio, looping)
-  audio.start({ left = { chip = {} } }, {}, now, looping)
+local function newExtra(audio, looping, basePlayClock)
+  audio.start({ left = { chip = {} } }, {},
+    basePlayClock or now, looping)
   return synth.engines[#synth.engines]
 end
 local function check(value, message)
@@ -140,6 +141,18 @@ audio.update()
 eq(engine.samples, 12288, "late harmony start skips the base source's played samples")
 audio.stop()
 baseSource.tell = nil
+
+-- When tell is unavailable, the supplied clock must represent the base
+-- Source's actual start time, not the earlier update that queued its first
+-- worker buffer.
+now = 375
+initialFree = 1000
+audio = newAudio()
+engine = newExtra(audio, true, now - 0.125)
+audio.update()
+eq(engine.samples, 8317,
+  "fallback cursor estimate skips elapsed playback before queueing harmony")
+audio.stop()
 
 -- A non-looping one-shot uses the shorter lead; looping songs retain the
 -- longer lead needed for stall tolerance.
