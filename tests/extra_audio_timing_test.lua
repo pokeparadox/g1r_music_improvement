@@ -10,6 +10,7 @@ local previousAudio = package.loaded["src.core.ChipAudio"]
 local now = 100
 local baseSource = { playing = true }
 function baseSource:isPlaying() return self.playing end
+function baseSource:getVolume() return self.volume or 1 end
 
 local sources = {}
 local initialFree = 1000
@@ -51,6 +52,8 @@ love = {
       function source:play() self.playing = true end
       function source:pause() self.playing = false end
       function source:stop() self.playing = false end
+      function source:setVolume(v) self.volume = v end
+      function source:getVolume() return self.volume or 1 end
       function source:getFreeBufferCount() return self.free end
       function source:queue()
         if failQueue then return false end
@@ -170,6 +173,31 @@ engine = newExtra(audio, true)
 audio.update()
 eq(engine.samples, 8192, "looping harmony keeps its full lead")
 audio.stop()
+
+-- A song fade-out lowers the base source volume directly; the harmony must
+-- follow the same ratio instead of staying at full volume.
+now = 600
+initialFree = 1000
+baseSource.volume = 0.7
+baseSource.playing = true
+audio = newAudio()
+audio.setMusicVolume(0.7)
+audio.setBaseVolume(0.7)
+engine = newExtra(audio, true)
+audio.update()
+local extraSource = sources[#sources]
+eq(extraSource:getVolume(), 1, "harmony starts at full volume during normal playback")
+baseSource.volume = 0.35
+audio.update()
+eq(extraSource:getVolume(), 0.5, "harmony follows the base fade-out ratio")
+baseSource.volume = 0
+audio.update()
+eq(extraSource:getVolume(), 0, "harmony reaches silence with the faded base")
+baseSource.volume = 0.7
+audio.update()
+eq(extraSource:getVolume(), 1, "harmony returns to full volume when the base does")
+audio.stop()
+baseSource.volume = nil
 
 package.loaded["src.core.ChipSynth"] = previousSynth
 package.loaded["src.core.ChipAudio"] = previousAudio

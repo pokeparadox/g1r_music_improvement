@@ -1122,6 +1122,7 @@ return function(mod)
     local out = next(vol, ctx)
     if extraAudio then
       pcall(extraAudio.setMusicVolume, tonumber(out) or vol)
+      pcall(extraAudio.setBaseVolume, tonumber(out) or vol)
     end
     return out
   end)

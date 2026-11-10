@@ -28,6 +28,8 @@ return function()
     lead = 8192,
     pendingBuffer = nil,
     pendingSamples = 0,
+    baseVolumeRef = nil,
+    fadeScale = 1,
   }
 
   local function isPlaying(src)
@@ -248,6 +250,19 @@ return function()
     end
     state.baseLastClock = now
     local baseSrc = currentBaseSource()
+    -- Music.fadeOut ramps the base source volume directly, bypassing the
+    -- music.volume hook. Follow that ratio so the harmony fades with it.
+    if baseSrc and type(baseSrc.getVolume) == "function" then
+      local okVol, baseVol = pcall(baseSrc.getVolume, baseSrc)
+      if okVol and type(baseVol) == "number" and state.baseVolumeRef
+          and state.baseVolumeRef > 0 then
+        local scale = math.max(0, math.min(1, baseVol / state.baseVolumeRef))
+        if scale ~= state.fadeScale then
+          state.fadeScale = scale
+          pcall(state.source.setVolume, state.source, scale)
+        end
+      end
+    end
     local basePlaying = isPlaying(baseSrc)
     if basePlaying and not isPlaying(state.source) then
       pcall(state.source.play, state.source)
@@ -285,6 +300,12 @@ return function()
     if n then state.musicVolume = math.max(0, n) end
   end
 
+  -- Full (non-fading) base volume, captured from the music.volume hook.
+  local function setBaseVolume(v)
+    local n = tonumber(v)
+    if n then state.baseVolumeRef = n end
+  end
+
   return {
     start = start,
     stop = stop,
@@ -292,5 +313,6 @@ return function()
     setExtraGain = setExtraGain,
     setSideEnabled = setSideEnabled,
     setMusicVolume = setMusicVolume,
+    setBaseVolume = setBaseVolume,
   }
 end
