@@ -177,6 +177,21 @@ return function(mod)
   for _, channel in ipairs(ordered) do
     local hw = channel.hardware or 1
     local eventProgramIndices = {}
+    -- Loop targets often point into the middle of a decoded command group
+    -- (e.g. at a note_type or octave byte). Record every byte address a
+    -- decode step reads so such targets map to that step's program index
+    -- instead of falling back to the start of the intro.
+    local stepIndex = 0
+    local readByte = channel.byte
+    if type(readByte) == "function" then
+      channel.byte = function(self)
+        local address = self.address
+        if type(address) == "number" then
+          eventProgramIndices[address] = stepIndex
+        end
+        return readByte(self)
+      end
+    end
     if channel.noise then
       local program = {}
       local prevTime = 0
@@ -190,6 +205,7 @@ return function(mod)
         guard = guard + 1
         if guard > 4096 then break end
         local sourceAddress = channel.address
+        stepIndex = #program + 1
         local okEvent, event = pcall(function() return channel:nextEvent() end)
         if not okEvent or event == nil then break end
         if type(sourceAddress) == "number" then
@@ -235,6 +251,7 @@ return function(mod)
           end
         end
       end
+      channel.byte = readByte
       if #program > 0 then
         local sourceTarget = stoppedLoopTarget(channel)
         local loopTo = sourceTarget and eventProgramIndices[sourceTarget]
@@ -257,6 +274,7 @@ return function(mod)
         guard = guard + 1
         if guard > 4096 then break end
         local sourceAddress = channel.address
+        stepIndex = #program + 1
         local okEvent, event = pcall(function() return channel:nextEvent() end)
         if not okEvent or event == nil then break end
         if type(sourceAddress) == "number" then
@@ -322,6 +340,7 @@ return function(mod)
           program[#program + 1] = { pitch = pitch, len = length }
         end
       end
+      channel.byte = readByte
       if #program > 0 then
         local sourceTarget = stoppedLoopTarget(channel)
         local loopTo = sourceTarget and eventProgramIndices[sourceTarget]

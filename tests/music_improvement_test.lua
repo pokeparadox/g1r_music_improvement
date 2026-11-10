@@ -48,7 +48,7 @@ local function mockEngine(includeNoise)
   local loopBytes = {
     [0x200] = 0xFE,
     [0x201] = 0,
-    [0x202] = 0x02,
+    [0x202] = 0x05,
     [0x203] = 0x01,
   }
   function channel:byte()
@@ -67,8 +67,8 @@ local function mockEngine(includeNoise)
     self.eventIndex = self.eventIndex + 1
     local events = {
       { address = 0x100, speed = 12, ticks = 12 * 0x100 },
-      { address = 0x101, speed = 6, ticks = 6 * 0x100, silence = true },
-      { address = 0x102, speed = 6, ticks = 6 * 0x100 },
+      { address = 0x102, speed = 6, ticks = 6 * 0x100, silence = true },
+      { address = 0x104, speed = 6, ticks = 6 * 0x100 },
     }
     local event = events[self.eventIndex]
     if not event then
@@ -76,7 +76,10 @@ local function mockEngine(includeNoise)
       self.address = 0x204
       return nil
     end
-    self.address = event.address + 1
+    self.address = event.address
+    self:byte()
+    self:byte()
+    self.address = event.address + 2
     self.speed = event.speed
     self.timeTicks = self.timeTicks + event.ticks
     if event.silence then return { silence = true } end
