@@ -343,6 +343,35 @@ T.eq(select(gen2SongId, { reason = "map" }),
 T.eq(select(gen1SongId, { reason = "map" }),
   "Music_ImprovedGen1CacheTest", "Gen1 song selection uses its enhanced mapping")
 
+-- ------- one-shot jingles restore the map theme after label rewrite
+
+local ChipAudioModule = require("src.core.ChipAudio")
+local MusicModule = require("src.core.Music")
+local realPlayMusic = ChipAudioModule.playMusic
+local function fakeSource()
+  return {
+    isPlaying = function() return true end,
+    setLooping = function() end,
+    play = function() end,
+    pause = function() end,
+    stop = function() end,
+    setVolume = function() end,
+    getVolume = function() return 1 end,
+    setPitch = function() end,
+  }
+end
+MusicModule.stop()
+local savedLoveAudio = love.audio
+love.audio = love.audio or {}
+ChipAudioModule.playMusic = function() return fakeSource() end
+T.check(MusicModule.playOnce(Data, gen1SongId),
+  "playOnce arms restore when select hook rewrites the jingle label")
+T.check(MusicModule.oneShotPlaying(),
+  "one-shot restore stays armed while the enhanced jingle plays")
+MusicModule.stop()
+ChipAudioModule.playMusic = realPlayMusic
+love.audio = savedLoveAudio
+
 local optionRows = Runtime.call("ui.options.rows",
   function(_, rows) return rows end, { data = Data },
   { { id = "sound", label = "SOUND" }, { id = "text_speed", label = "TEXT SPEED" } })

@@ -987,6 +987,22 @@ return function(mod)
     return out
   end)
 
+  -- playOnce only arms its map-theme restore when the label it passed in
+  -- became the current song.  The select hook below rewrites that label, so
+  -- the jingle plays but the map theme never comes back.  Give core the
+  -- improved label up front instead.
+  if okMusic and type(Music.playOnce) == "function" then
+    local corePlayOnce = Music.playOnce
+    Music.playOnce = function(data, song)
+      local improved = type(song) == "string" and improvedMap[song] or nil
+      if improved and mod.options:get("enabled") ~= false
+          and not state.skipped then
+        song = improved
+      end
+      return corePlayOnce(data, song)
+    end
+  end
+
   mod.hooks:wrap("music.select", function(next, chosen, ctx)
     if mod.options:get("enabled") == false then
       return next(chosen, ctx)
