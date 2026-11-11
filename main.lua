@@ -186,7 +186,15 @@ return function(mod)
       drums = {},
       waves = type(engine.waves) == "table" and #engine.waves > 0 and engine.waves or nil,
     }
-  local drumIds = {}
+    -- Gen2 note length comes from note_type (channel.noteLength); speed is a
+    -- Gen1 field and stays 12 on Gold channels.
+    local function eventSpeed(channel)
+      if engine.generation == 2 then
+        return math.max(1, channel.noteLength or 1)
+      end
+      return channel.speed or 12
+    end
+    local drumIds = {}
   local ordered = {}
   for _, channel in ipairs(engine.channels) do ordered[#ordered + 1] = channel end
   table.sort(ordered, function(a, b) return (a.hardware or 1) < (b.hardware or 1) end)
@@ -210,11 +218,9 @@ return function(mod)
     end
     if channel.noise then
       local program = {}
-      local prevTime = 0
+      local emittedTicks = 0
       local guard = 0
-      local speed = channel.speed or 12
       local lastSpeed
-      local tempo = engine.tempo or 0x100
       local lastTempo
       while true do
         if channel.ended then break end
@@ -228,12 +234,11 @@ return function(mod)
           eventProgramIndices[sourceAddress] = #program + 1
         end
         local timeTicks = channel.timeTicks or 0
-        local ticks = timeTicks - prevTime
-        prevTime = timeTicks
-        speed = channel.speed or speed
-        tempo = engine.tempo or tempo
-        local length = math.floor(ticks / (speed * tempo) + 0.5)
+        local speed = eventSpeed(channel)
+        local tempo = engine.tempo or 0x100
+        local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
         if length < 1 then length = 1 end
+        emittedTicks = emittedTicks + length * speed * tempo
         if tempo ~= lastTempo then
           program[#program + 1] = { tempo = tempo }
           lastTempo = tempo
@@ -270,20 +275,23 @@ return function(mod)
       channel.byte = readByte
       if #program > 0 then
         local sourceTarget = stoppedLoopTarget(channel)
-        local loopTo = sourceTarget and eventProgramIndices[sourceTarget]
-        if sourceTarget and not loopTo then
-          mod.log:warn(
-            "music_improvement: couldn't map loop target %04X for %s channel %d",
-            sourceTarget, id, hw)
+        if sourceTarget then
+          local loopTo = eventProgramIndices[sourceTarget]
+          if not loopTo then
+            mod.log:warn(
+              "music_improvement: couldn't map loop target %04X for %s channel %d",
+              sourceTarget, id, hw)
+            loopTo = 1
+          end
+          program[#program + 1] = { loop = { count = 0, to = loopTo } }
         end
-        program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
         src.channels[#src.channels + 1] = { hw = hw, program = program }
       end
     else
       local program = {}
       local lastDuty, lastNotetypeKey, lastOctave, lastTempo =
         nil, nil, nil, nil
-      local prevTime = 0
+      local emittedTicks = 0
       local guard = 0
       while true do
         if channel.noise or channel.ended then break end
@@ -297,12 +305,11 @@ return function(mod)
           eventProgramIndices[sourceAddress] = #program + 1
         end
         local timeTicks = channel.timeTicks or 0
-        local ticks = timeTicks - prevTime
-        prevTime = timeTicks
-        local speed = channel.speed or 12
+        local speed = eventSpeed(channel)
         local tempo = engine.tempo or 0x100
-        local length = math.floor(ticks / (speed * tempo) + 0.5)
+        local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
         if length < 1 then length = 1 end
+        emittedTicks = emittedTicks + length * speed * tempo
 
         if tempo ~= lastTempo then
           program[#program + 1] = { tempo = tempo }
@@ -359,13 +366,16 @@ return function(mod)
       channel.byte = readByte
       if #program > 0 then
         local sourceTarget = stoppedLoopTarget(channel)
-        local loopTo = sourceTarget and eventProgramIndices[sourceTarget]
-        if sourceTarget and not loopTo then
-          mod.log:warn(
-            "music_improvement: couldn't map loop target %04X for %s channel %d",
-            sourceTarget, id, hw)
+        if sourceTarget then
+          local loopTo = eventProgramIndices[sourceTarget]
+          if not loopTo then
+            mod.log:warn(
+              "music_improvement: couldn't map loop target %04X for %s channel %d",
+              sourceTarget, id, hw)
+            loopTo = 1
+          end
+          program[#program + 1] = { loop = { count = 0, to = loopTo } }
         end
-        program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
         src.channels[#src.channels + 1] = { hw = hw, program = program }
       end
     end
@@ -1057,10 +1067,10 @@ return function(mod)
     end
   end
 
-  -- Realtime harmony must not allocate/render until threaded base audio starts.
+  -- Prepare harmony while the threaded base source buffers, so both start
+  -- from sample zero. Fallback paths still wait for the base to play.
   local pendingExtra
   local pendingLooping = true
-  local basePlayClock
   local function g1rClock()
     if love and love.timer and type(love.timer.getTime) == "function" then
       local ok, t = pcall(love.timer.getTime)
@@ -1089,13 +1099,9 @@ return function(mod)
         local ok, value = pcall(ChipAudio.awaitingFirstBuffer)
         if ok and value ~= true then
           -- updateThreaded starts the base Source during baseChipUpdate.
-          -- Timestamp after it returns so the fallback cursor estimate does
-          -- not count worker-buffer queueing time before playback began.
-          basePlayClock = g1rClock()
-          local extra = pendingExtra
+          -- start() already pre-rendered harmony while the base buffered.
           pendingExtra = nil
           if extraAudio then
-            pcall(extraAudio.start, extra, musicData(), basePlayClock, pendingLooping)
             pcall(extraAudio.update)
           end
         end
@@ -1135,6 +1141,9 @@ return function(mod)
           pcall(extraAudio.update)
         else
           pendingExtra = extra
+          -- Base source is still buffering. Build and pre-render harmony now
+          -- so it can start with the base instead of one update later.
+          pcall(extraAudio.start, extra, musicData(), nil, pendingLooping)
         end
       else
         pendingExtra = nil
@@ -1198,9 +1207,7 @@ return function(mod)
             local okSource, source = pcall(ChipAudio.currentSource)
             local okPlaying, playing = okSource and source and pcall(source.isPlaying, source)
             if okPlaying and playing then
-              local extra = pendingExtra
               pendingExtra = nil
-              pcall(extraAudio.start, extra, musicData(), basePlayClock, pendingLooping)
             end
           end
           pcall(extraAudio.update)

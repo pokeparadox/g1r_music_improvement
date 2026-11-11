@@ -24,12 +24,12 @@ ChipSynth.newEngine = function(_, header, options)
   if type(header) ~= "table" or header.address ~= address or header.bank ~= bank then
     return originalNewEngine(_, header, options)
   end
-  local engine = { tempo = 0x100, generation = 1, channels = {} }
+  local engine = { tempo = 0x100, generation = 2, channels = {} }
   local channel = {
     engine = engine, hardware = 1, speed = 12, volume = 8, fade = 0,
     timeTicks = 0, ended = false, address = 0x100, eventIndex = 0,
   }
-  local loopBytes = { [0x200] = 0xFE, [0x201] = 0, [0x202] = 0x05, [0x203] = 0x01 }
+  local loopBytes = { [0x200] = 0xFD, [0x201] = 0, [0x202] = 0x05, [0x203] = 0x01 }
   function channel:byte()
     local value = loopBytes[self.address] or 0
     self.address = self.address + 1
@@ -45,9 +45,9 @@ ChipSynth.newEngine = function(_, header, options)
   function channel:nextEvent()
     self.eventIndex = self.eventIndex + 1
     local events = {
-      { address = 0x100, speed = 12, ticks = 12 * 0x100 },
-      { address = 0x102, speed = 6, ticks = 6 * 0x100, silence = true },
-      { address = 0x104, speed = 6, ticks = 6 * 0x100 },
+      { address = 0x100, noteLength = 8, ticks = 8 * 0x100 },
+      { address = 0x102, noteLength = 12, ticks = 12 * 0x100, silence = true },
+      { address = 0x104, noteLength = 8, ticks = 8 * 0x100 },
     }
     local event = events[self.eventIndex]
     if not event then
@@ -59,7 +59,7 @@ ChipSynth.newEngine = function(_, header, options)
     self:byte()
     self:byte()
     self.address = event.address + 2
-    self.speed = event.speed
+    self.noteLength = event.noteLength
     self.timeTicks = self.timeTicks + event.ticks
     if event.silence then return { silence = true } end
     return { register = 1000, volume = 8, fade = 0, duty = 1 }
@@ -92,6 +92,13 @@ exports.prepareAll()
 local improved = "Music_ImprovedGen2LiveData"
 T.check(type(data.audio.songs[improved]) == "table",
   "game.ready dataset is translated and registered")
+local generated = originalNewEngine(data, data.audio.songs[improved],
+  { allowLoops = false })
+T.check(type(generated) == "table", "generated song decodes")
+local generatedChannel = generated.channels[1]
+while generatedChannel:nextEvent() do end
+T.eq(generatedChannel.timeTicks, 28 * 0x100,
+  "Gen2 note lengths control generated timing")
 local _, cache = require("src.mods.ImportAccess").new(musicMod.manifest, run.loader.fs)
 local path = "songs/gold_" .. tostring(musicMod.manifest.version)
   .. "_true_" .. songId .. ".lua"

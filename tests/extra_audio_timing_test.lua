@@ -87,7 +87,25 @@ local function eq(actual, expected, message)
   end
 end
 
+-- A harmony track prepared before the threaded base starts must be fully
+-- buffered, then begin with the base at sample zero instead of one update late.
+now = 90
+baseSource.playing = false
+local preparedAudio = newAudio()
+local preparedEngine = newExtra(preparedAudio, true)
+local preparedSource = sources[#sources]
+eq(preparedEngine.samples, 8192, "prepared harmony renders its lead before base starts")
+eq(preparedSource.queued, 16, "prepared harmony queues the full lead")
+eq(preparedSource.playing, false, "prepared harmony waits for the base")
+baseSource.playing = true
+now = 91
+preparedAudio.update()
+eq(preparedSource.playing, true, "prepared harmony starts with the base")
+eq(preparedEngine.samples, 8192, "starting with base does not skip the lead")
+preparedAudio.stop()
+
 -- A paused base source must not accrue the pause duration as elapsed audio.
+now = 100
 local audio = newAudio()
 local engine = newExtra(audio, true)
 audio.update()

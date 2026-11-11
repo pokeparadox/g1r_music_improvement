@@ -239,6 +239,15 @@ return function()
     state.baseLastClock = startedAt
     local baseSrc = currentBaseSource()
     state.baseWasPlaying = isPlaying(baseSrc)
+    -- Base is still buffering (threaded start): render the lead now so both
+    -- sources can begin on the same sample, not one update later.
+    if not state.baseWasPlaying then
+      local guard = 0
+      while state.extraRendered < state.lead and guard < 64 do
+        guard = guard + 1
+        if not renderChunk() then break end
+      end
+    end
   end
 
   local function update()
@@ -264,11 +273,6 @@ return function()
       end
     end
     local basePlaying = isPlaying(baseSrc)
-    if basePlaying and not isPlaying(state.source) then
-      pcall(state.source.play, state.source)
-    elseif (not basePlaying) and isPlaying(state.source) then
-      pcall(state.source.pause, state.source)
-    end
     state.baseWasPlaying = basePlaying
 
     if basePlaying then
@@ -278,6 +282,11 @@ return function()
         guard = guard + 1
         if not renderChunk() then break end
       end
+    end
+    if basePlaying and not isPlaying(state.source) then
+      pcall(state.source.play, state.source)
+    elseif (not basePlaying) and isPlaying(state.source) then
+      pcall(state.source.pause, state.source)
     end
   end
 
