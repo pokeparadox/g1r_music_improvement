@@ -11,6 +11,21 @@ return function(mod)
   local okMusic, Music = pcall(require, "src.core.Music")
   local okGameVersion, GameVersion = pcall(require, "src.core.GameVersion")
 
+  -- Gen1 keeps its music in the src.core.Data singleton; Gen2 builds the
+  -- dataset in Game2.data and never fills Data.audio.  Prefer whichever
+  -- table actually carries songs, and let game.ready promote the live one.
+  local liveData
+  local function isSongData(data)
+    return type(data) == "table" and type(data.audio) == "table"
+      and type(data.audio.songs) == "table"
+  end
+  local function musicData()
+    if isSongData(liveData) then return liveData end
+    if isSongData(Data) then return Data end
+    return liveData or Data
+  end
+  if isSongData(Data) then liveData = Data end
+
   local function loadModFile(name)
     local source = mod:read(name)
     if not source then
@@ -106,17 +121,18 @@ return function(mod)
         or type(def.bank) ~= "number" then
       return nil
     end
+    local data = musicData()
     if not okChipSynth or type(ChipSynth) ~= "table"
         or type(ChipSynth.newEngine) ~= "function"
-        or not okData or type(Data) ~= "table" then
+        or type(data) ~= "table" then
       mod.log:error("music_improvement: ChipSynth/Data unavailable -- cannot translate %s", id)
       return nil
     end
     local engineType = def.engine
-    if engineType == nil and Data.audio and Data.audio.gen2 == true then
+    if engineType == nil and data.audio and data.audio.gen2 == true then
       engineType = "gen2"
     end
-    local okEngine, engine = pcall(ChipSynth.newEngine, Data, {
+    local okEngine, engine = pcall(ChipSynth.newEngine, data, {
       address = def.address, bank = def.bank, engine = engineType,
     }, { allowLoops = false })
     if not okEngine or type(engine) ~= "table" or not engine.channels then
@@ -436,9 +452,9 @@ return function(mod)
     end
     -- after the merge boundary both registry writes raise, so keep the live
     -- table authoritative for playback and the music test list.
-    if okData and type(Data) == "table" and type(Data.audio) == "table"
-        and type(Data.audio.songs) == "table" then
-      Data.audio.songs[improvedId] = def
+    local data = musicData()
+    if isSongData(data) then
+      data.audio.songs[improvedId] = def
     end
     return improvedId
   end
@@ -610,7 +626,7 @@ return function(mod)
     if not chunk then return nil end
     local ok, def = pcall(chunk)
     if ok and type(def) == "table" and type(def.chip) == "table" then
-      local valid, engine = pcall(ChipSynth.newEngine, Data, def, { allowLoops = true })
+      local valid, engine = pcall(ChipSynth.newEngine, musicData(), def, { allowLoops = true })
       if valid and type(engine) == "table" then return def end
       mod.log:warn("music_improvement: invalid cached song %s: %s", path, tostring(engine))
     end
@@ -628,7 +644,7 @@ return function(mod)
     end
     if not improvedMap[song] then return end
     local loop = currentReason ~= "once" and currentReason ~= "victory" or false
-    pcall(Music.play, Data, song, loop, { reason = currentReason or "map" })
+    pcall(Music.play, musicData(), song, loop, { reason = currentReason or "map" })
   end
 
   local function buildQueue(settings, force, game)
@@ -652,15 +668,16 @@ return function(mod)
       return
     end
     local ids = {}
-    if okData and type(Data) == "table" and type(Data.audio) == "table"
-        and type(Data.audio.songs) == "table" then
-      for id in pairs(Data.audio.songs) do ids[#ids + 1] = id end
+    local data = (game and game.data) or musicData()
+    if isSongData(data) then
+      if data ~= liveData then liveData = data end
+      for id in pairs(data.audio.songs) do ids[#ids + 1] = id end
     end
     table.sort(ids)
     local hash = settingsHash(settings)
     for _, id in ipairs(ids) do
       if not tostring(id):match("^Music_Improved") then
-        local def = Data.audio.songs[id]
+        local def = data.audio.songs[id]
         local shouldProcess = true
         if shouldProcess then
           originalDefs[id] = def
@@ -756,7 +773,7 @@ return function(mod)
         mod.log:warn("music_improvement: skipping %s (missing ROM address/bank)", tostring(id))
       end
       if translated then
-        local okDef, defErr = pcall(ChipSynth.newEngine, Data, translated,
+        local okDef, defErr = pcall(ChipSynth.newEngine, musicData(), translated,
           { allowLoops = true })
         if not okDef or type(defErr) ~= "table" then
           mod.log:warn("music_improvement: generated song invalid for %s: %s",
@@ -1078,7 +1095,7 @@ return function(mod)
           local extra = pendingExtra
           pendingExtra = nil
           if extraAudio then
-            pcall(extraAudio.start, extra, Data, basePlayClock, pendingLooping)
+            pcall(extraAudio.start, extra, musicData(), basePlayClock, pendingLooping)
             pcall(extraAudio.update)
           end
         end
@@ -1114,7 +1131,7 @@ return function(mod)
           end
         end
         if basePlaying then
-          pcall(extraAudio.start, extra, Data, g1rClock(), currentReason ~= "once")
+          pcall(extraAudio.start, extra, musicData(), g1rClock(), currentReason ~= "once")
           pcall(extraAudio.update)
         else
           pendingExtra = extra
@@ -1183,7 +1200,7 @@ return function(mod)
             if okPlaying and playing then
               local extra = pendingExtra
               pendingExtra = nil
-              pcall(extraAudio.start, extra, Data, basePlayClock, pendingLooping)
+              pcall(extraAudio.start, extra, musicData(), basePlayClock, pendingLooping)
             end
           end
           pcall(extraAudio.update)
