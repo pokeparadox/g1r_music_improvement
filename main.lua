@@ -199,6 +199,13 @@ return function(mod)
   for _, channel in ipairs(engine.channels) do ordered[#ordered + 1] = channel end
   table.sort(ordered, function(a, b) return (a.hardware or 1) < (b.hardware or 1) end)
   for _, channel in ipairs(ordered) do
+    -- ponytail: per-channel tempo reset. Gen2 tempo is a shared engine
+    -- register, but translate() builds each channel in isolation; let each
+    -- channel start from the song's initial tempo instead of inheriting
+    -- whatever the previous channel left behind. Upgrade path: decode all
+    -- channels in parallel time order if multiple channels issue tempo
+    -- commands.
+    engine.tempo = src.tempo
     local hw = channel.hardware or 1
     local eventProgramIndices = {}
     -- Loop targets often point into the middle of a decoded command group
@@ -221,7 +228,7 @@ return function(mod)
       local emittedTicks = 0
       local guard = 0
       local lastSpeed
-      local lastTempo
+      local lastTempo = src.tempo
       while true do
         if channel.ended then break end
         guard = guard + 1
@@ -290,7 +297,7 @@ return function(mod)
     else
       local program = {}
       local lastDuty, lastNotetypeKey, lastOctave, lastTempo =
-        nil, nil, nil, nil
+        nil, nil, nil, src.tempo
       local emittedTicks = 0
       local guard = 0
       while true do

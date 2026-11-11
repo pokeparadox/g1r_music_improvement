@@ -16,6 +16,12 @@ Data.audio.songs[gen2SongId] = {
   address = gen2Address,
   bank = gen2Bank,
 }
+local tempoSongId = "Music_Gen2TempoTest"
+local tempoAddress, tempoBank = 0x7FFA, 0x7D
+Data.audio.songs[tempoSongId] = {
+  address = tempoAddress,
+  bank = tempoBank,
+}
 local gen1SongId = "Music_Gen1CacheTest"
 local gen1Address, gen1Bank = 0x7FFC, 0x7F
 Data.audio.songs[gen1SongId] = {
@@ -133,6 +139,70 @@ local function mockEngine(includeNoise)
   return engine
 end
 ChipSynth.newEngine = function(data, header, options)
+  if type(header) == "table" and header.address == tempoAddress
+      and header.bank == tempoBank then
+    local engine = { tempo = 0x100, generation = 2, channels = {} }
+    local function stub(ch)
+      ch.engine = engine
+      ch.speed = 12
+      ch.volume = 8
+      ch.fade = 0
+      ch.timeTicks = 0
+      ch.ended = false
+      ch.eventIndex = 0
+      function ch:byte()
+        local value = 0
+        self.address = self.address + 1
+        return value
+      end
+      function ch:word()
+        local low, high = self:byte(), self:byte()
+        return low + high * 0x100
+      end
+      function ch:frequency(note, octave)
+        return 1000 + note * 2 + octave
+      end
+      return ch
+    end
+    local ch1 = stub({ hardware = 1, noteLength = 8, address = 0x100 })
+    function ch1:nextEvent()
+      self.eventIndex = self.eventIndex + 1
+      if self.eventIndex == 1 then
+        self.address = 0x101
+        self:byte(); self:byte()
+        self.address = 0x103
+        self.timeTicks = 8 * 0x100
+        return { register = 1000, volume = 8, fade = 0, duty = 1 }
+      elseif self.eventIndex == 2 then
+        engine.tempo = 0x86
+        self.address = 0x105
+        self:byte(); self:byte()
+        self.address = 0x107
+        self.timeTicks = 16 * 0x100
+        return { register = 1000, volume = 8, fade = 0, duty = 1 }
+      end
+      self.ended = true
+      self.address = 0x109
+      return nil
+    end
+    engine.channels[1] = ch1
+    local ch2 = stub({ hardware = 2, noteLength = 8, address = 0x200 })
+    function ch2:nextEvent()
+      self.eventIndex = self.eventIndex + 1
+      if self.eventIndex == 1 then
+        self.address = 0x201
+        self:byte(); self:byte()
+        self.address = 0x203
+        self.timeTicks = 8 * 0x100
+        return { register = 1000, volume = 8, fade = 0, duty = 1 }
+      end
+      self.ended = true
+      self.address = 0x205
+      return nil
+    end
+    engine.channels[2] = ch2
+    return engine
+  end
   if type(header) == "table" and header.address == gen2Address
       and header.bank == gen2Bank then
     gen2HeaderSeen = header
@@ -402,4 +472,18 @@ CoreData.audio = previousAudio
 Version.modApi = previousModApi
 GameVersion.set(previousVersion)
 run.release()
+-- Shared Gen2 tempo must not leak between channels during translation.
+local tempoImproved = Data.audio.songs["Music_ImprovedGen2TempoTest"]
+T.check(type(tempoImproved) == "table",
+  "tempo test song is translated")
+if type(tempoImproved) == "table" and type(tempoImproved.channels) == "table"
+    and tempoImproved.channels[2] then
+  local hasTempo = false
+  for _, event in ipairs(tempoImproved.channels[2].program or {}) do
+    if event.tempo ~= nil then hasTempo = true end
+  end
+  T.check(not hasTempo,
+    "a plain channel does not restamp shared tempo")
+end
+
 T.finish("g1r_music_improvement")
