@@ -12,6 +12,9 @@ Rather than replacing the original sound system with external instruments or pre
 The result is a more immersive and layered soundtrack that retains the character of classic Game Boy music.
 There are no large files to download as we generate and cache the additional channels on startup.
 
+## Demo
+[Gold Demo](https://youtu.be/C1w4JDoufZg)
+
 ## Features
 
 ### 🎵 Enhanced Original Music
