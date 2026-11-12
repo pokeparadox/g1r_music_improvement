@@ -23,6 +23,20 @@ Data.audio.songs[gen1SongId] = {
   bank = gen1Bank,
   engine = "gen1",
 }
+-- Gold's Music_AfterTheRivalFight loops into Music_LookRival's byte stream.
+local crossSongId = "Music_Gen2CrossLoopTest"
+local crossAddress, crossBank = 0x7FFA, 0x7D
+Data.audio.songs[crossSongId] = {
+  address = crossAddress,
+  bank = crossBank,
+}
+
+local noLoopSongId = "Music_Gen2NoLoopTest"
+local noLoopAddress, noLoopBank = 0x7FF8, 0x7C
+Data.audio.songs[noLoopSongId] = {
+  address = noLoopAddress,
+  bank = noLoopBank,
+}
 
 local CoreData = require("src.core.Data")
 local previousAudio = CoreData.audio
@@ -132,7 +146,136 @@ local function mockEngine(includeNoise)
   end
   return engine
 end
+local function mockCrossLoopEngine()
+  local engine = { tempo = 0x100, generation = 2, channels = {} }
+  local channel = {
+    engine = engine,
+    hardware = 1,
+    noteLength = 12,
+    volume = 8,
+    fade = 0,
+    timeTicks = 0,
+    ended = false,
+    address = 0x800,
+    eventIndex = 0,
+  }
+  local loopBytes = {
+    [0x802] = 0xFD, [0x803] = 0, [0x804] = 0x00, [0x805] = 0x09,
+    [0x902] = 0xFD, [0x903] = 0, [0x904] = 0x00, [0x905] = 0x09,
+  }
+  function channel:byte()
+    local value = loopBytes[self.address] or 0
+    self.address = self.address + 1
+    return value
+  end
+  function channel:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
+  function channel:frequency(note, octave)
+    return 1000 + note * 2 + octave
+  end
+  function channel:nextEvent()
+    self.eventIndex = self.eventIndex + 1
+    if self.eventIndex == 1 or self.eventIndex == 3 then
+      self.address = self.eventIndex == 1 and 0x800 or 0x900
+      self.timeTicks = self.timeTicks + 12 * 0x100
+      return {
+        register = self.eventIndex == 1 and 1000 or 1200,
+        volume = 8, fade = 0, duty = 1,
+      }
+    end
+    self.ended = true
+    self.address = self.eventIndex == 2 and 0x806 or 0x906
+    return nil
+  end
+  engine.channels[1] = channel
+  return engine
+end
+local function mockNoLoopEngine()
+  local engine = { tempo = 0x100, generation = 2, channels = {} }
+  local channel = {
+    engine = engine,
+    hardware = 1,
+    noteLength = 12,
+    volume = 8,
+    fade = 0,
+    timeTicks = 0,
+    ended = false,
+    address = 0x600,
+    eventIndex = 0,
+  }
+  function channel:byte()
+    self.address = self.address + 1
+    return 0
+  end
+  function channel:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
+  function channel:frequency(note, octave)
+    return 1000 + note * 2 + octave
+  end
+  function channel:nextEvent()
+    self.eventIndex = self.eventIndex + 1
+    if self.eventIndex == 1 then
+      self.address = 0x600
+      self.timeTicks = self.timeTicks + 12 * 0x100
+      return { register = 1000, volume = 8, fade = 0, duty = 1 }
+    end
+    self.ended = true
+    self.address = 0x606
+    -- Shared Gen2 tempo register: a tempo command on one channel must not
+    -- leak into the next channel's translation.
+    engine.tempo = 0x80
+    return nil
+  end
+  engine.channels[1] = channel
+  local channel2 = {
+    engine = engine,
+    hardware = 2,
+    noteLength = 12,
+    volume = 8,
+    fade = 0,
+    timeTicks = 0,
+    ended = false,
+    address = 0x610,
+    eventIndex = 0,
+  }
+  function channel2:byte()
+    self.address = self.address + 1
+    return 0
+  end
+  function channel2:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
+  function channel2:frequency(note, octave)
+    return 1200 + note * 2 + octave
+  end
+  function channel2:nextEvent()
+    self.eventIndex = self.eventIndex + 1
+    if self.eventIndex == 1 then
+      self.address = 0x610
+      self.timeTicks = self.timeTicks + 6 * 0x100
+      return { register = 1200, volume = 8, fade = 0, duty = 1 }
+    end
+    self.ended = true
+    self.address = 0x616
+    return nil
+  end
+  engine.channels[2] = channel2
+  return engine
+end
 ChipSynth.newEngine = function(data, header, options)
+  if type(header) == "table" and header.address == crossAddress
+      and header.bank == crossBank then
+    return mockCrossLoopEngine()
+  end
+  if type(header) == "table" and header.address == noLoopAddress
+      and header.bank == noLoopBank then
+    return mockNoLoopEngine()
+  end
   if type(header) == "table" and header.address == gen2Address
       and header.bank == gen2Bank then
     gen2HeaderSeen = header
@@ -228,6 +371,72 @@ T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
 T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
     and gen2Cached.extra.left.generation, 1,
   "generated harmony cache is pinned to the Gen1 decoder")
+local crossCachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
+  and musicMod.manifest.version or "0")
+  .. "_true_" .. crossSongId .. ".lua"
+local crossBytes = cache and cache:read(crossCachePath)
+local crossCached
+if type(crossBytes) == "string" then
+  local chunk = load(crossBytes)
+  if chunk then crossCached = chunk() end
+end
+T.check(crossCached and crossCached.chip and crossCached.chip.blob,
+  "cross-song loop song is cached")
+local crossRegisters = {}
+if crossCached then
+  local crossEngine = originalNewEngine(Data, crossCached, { allowLoops = true })
+  local crossChannel = crossEngine.channels[1]
+  for index = 1, 3 do
+    local event = crossChannel:nextEvent()
+    crossRegisters[index] = event and event.register
+  end
+end
+T.check(crossRegisters[2] ~= nil and crossRegisters[2] ~= crossRegisters[1],
+  "cross-song loop target continues decoding the foreign stream")
+T.eq(crossRegisters[3], crossRegisters[2],
+  "cross-song loop points at the continuation instead of the intro")
+local noLoopCachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
+  and musicMod.manifest.version or "0")
+  .. "_true_" .. noLoopSongId .. ".lua"
+local noLoopBytes = cache and cache:read(noLoopCachePath)
+local noLoopCached
+if type(noLoopBytes) == "string" then
+  local chunk = load(noLoopBytes)
+  if chunk then noLoopCached = chunk() end
+end
+local noLoopRegisters = {}
+if noLoopCached then
+  local noLoopEngine = originalNewEngine(Data, noLoopCached, { allowLoops = true })
+  local noLoopChannel = noLoopEngine.channels[1]
+  for index = 1, 3 do
+    local event = noLoopChannel:nextEvent()
+    noLoopRegisters[index] = event and event.register
+  end
+end
+T.eq(noLoopRegisters[2], noLoopRegisters[1],
+  "songs without a source loop still loop to their start")
+local noLoopDurations = {}
+if noLoopCached then
+  local noLoopEngine = originalNewEngine(Data, noLoopCached,
+    { allowLoops = false })
+  for index, channel in ipairs(noLoopEngine.channels) do
+    while channel:nextEvent() do end
+    noLoopDurations[index] = channel.timeTicks
+  end
+end
+T.eq(noLoopDurations[2], noLoopDurations[1],
+  "no-source-loop channels restart together at the song length")
+local noLoopFirstDurations = {}
+if noLoopCached then
+  local noLoopEngine = originalNewEngine(Data, noLoopCached,
+    { allowLoops = true })
+  for index, channel in ipairs(noLoopEngine.channels) do
+    local event = channel:nextEvent()
+    noLoopFirstDurations[index] = event and channel.timeTicks
+  end
+end
+T.eq(noLoopFirstDurations[2], 12 * 0x100,
+  "channel translation starts from the song tempo, not the previous channel")
 local generatedDrum = gen1Cached and gen1Cached.chip
   and gen1Cached.chip.drums and gen1Cached.chip.drums[1]
 T.eq(generatedDrum and #generatedDrum, 2,

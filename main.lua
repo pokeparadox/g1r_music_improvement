@@ -186,6 +186,29 @@ return function(mod)
       drums = {},
       waves = type(engine.waves) == "table" and #engine.waves > 0 and engine.waves or nil,
     }
+    -- Gen2 tempo is a shared engine register.  Channel 1 owns the song's
+    -- tempo commands, so record them as a timeline and replay that same
+    -- timeline while decoding the other channels.  Without it, a channel with
+    -- no tempo commands is decoded at whatever tempo the previous channel
+    -- happened to leave behind (the Gold intro changes 256 -> 168 after two
+    -- notes, so both the stale and reset-to-initial variants drift).
+    local tempoTimeline = { { tick = 0, tempo = src.tempo } }
+    local function tempoAt(tick)
+      local value = tempoTimeline[1].tempo
+      for _, entry in ipairs(tempoTimeline) do
+        if entry.tick <= tick then value = entry.tempo else break end
+      end
+      return value
+    end
+    local function recordTempo(tick, tempo)
+      local last = tempoTimeline[#tempoTimeline]
+      if last and last.tempo == tempo then return end
+      if last and last.tick == tick then
+        last.tempo = tempo
+        return
+      end
+      tempoTimeline[#tempoTimeline + 1] = { tick = tick, tempo = tempo }
+    end
     -- Gen2 note length comes from note_type (channel.noteLength); speed is a
     -- Gen1 field and stays 12 on Gold channels.
     local function eventSpeed(channel)
@@ -194,11 +217,42 @@ return function(mod)
       end
       return channel.speed or 12
     end
+    -- Some songs loop into another song's stream (e.g. Gold's
+    -- Music_AfterTheRivalFight loops into Music_LookRival). Continue decoding
+    -- at the foreign target with the live channel state until the target is
+    -- mapped into this program.
+    local function resolveLoop(program, indices, channel, decode, id, hw,
+        songAddress)
+      local sourceTarget = stoppedLoopTarget(channel)
+      local seen = {}
+      for _ = 1, 8 do
+        if not sourceTarget or indices[sourceTarget] or seen[sourceTarget]
+            or not songAddress or sourceTarget >= songAddress then
+          break
+        end
+        seen[sourceTarget] = true
+        channel.ended = false
+        channel.address = sourceTarget
+        decode()
+        sourceTarget = stoppedLoopTarget(channel)
+      end
+      local loopTo = sourceTarget and indices[sourceTarget]
+      if sourceTarget and not loopTo then
+        mod.log:warn(
+          "music_improvement: couldn't map loop target %04X for %s channel %d",
+          sourceTarget, id, hw)
+      end
+      return sourceTarget, loopTo
+    end
+    local noLoop = {}
     local drumIds = {}
   local ordered = {}
   for _, channel in ipairs(engine.channels) do ordered[#ordered + 1] = channel end
   table.sort(ordered, function(a, b) return (a.hardware or 1) < (b.hardware or 1) end)
   for _, channel in ipairs(ordered) do
+    -- Channel 1 defines the tempo timeline; every other channel is decoded
+    -- against it (see tempoTimeline above).
+    engine.tempo = src.tempo
     local hw = channel.hardware or 1
     local eventProgramIndices = {}
     -- Loop targets often point into the middle of a decoded command group
@@ -221,164 +275,257 @@ return function(mod)
       local emittedTicks = 0
       local guard = 0
       local lastSpeed
-      local lastTempo
-      while true do
-        if channel.ended then break end
-        guard = guard + 1
-        if guard > 4096 then break end
-        local sourceAddress = channel.address
-        stepIndex = #program + 1
-        local okEvent, event = pcall(function() return channel:nextEvent() end)
-        if not okEvent or event == nil then break end
-        if type(sourceAddress) == "number" then
-          eventProgramIndices[sourceAddress] = #program + 1
-        end
-        local timeTicks = channel.timeTicks or 0
-        local speed = eventSpeed(channel)
-        local tempo = engine.tempo or 0x100
-        local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
-        if length < 1 then length = 1 end
-        emittedTicks = emittedTicks + length * speed * tempo
-        if tempo ~= lastTempo then
-          program[#program + 1] = { tempo = tempo }
-          lastTempo = tempo
-        end
-        if speed ~= lastSpeed then
-          program[#program + 1] = { notetype = { speed = speed } }
-          lastSpeed = speed
-        end
-        if event.silence then
-          program[#program + 1] = { rest = length }
-        elseif event.noise then
-          if event.drum then
-            local drumId = drumIds[event.drum]
-            if not drumId then
-              drumId = #src.drums + 1
-              if drumId > 255 then drumId = 255 end
-              src.drums[drumId] = drumRows(
-                event.drum, channel.frameTicks, ChipSynth.SAMPLE_RATE)
-              drumIds[event.drum] = drumId
-            end
-            program[#program + 1] = { drum = drumId, len = length }
-          else
-            program[#program + 1] = {
-              noiseNote = {
-                len = length,
-                volume = event.volume or 12,
-                fade = event.fade or 0,
-                parameter = event.noiseParameter or 0,
-              },
-            }
+      local lastTempo = src.tempo
+      local decode
+      decode = function()
+        while true do
+          if channel.ended then break end
+          guard = guard + 1
+          if guard > 4096 then break end
+          if hw ~= 1 then
+            engine.tempo = tempoAt(channel.timeTicks or 0)
           end
+          local sourceAddress = channel.address
+          stepIndex = #program + 1
+          local okEvent, event = pcall(function() return channel:nextEvent() end)
+          if not okEvent or event == nil then break end
+          if type(sourceAddress) == "number" then
+            eventProgramIndices[sourceAddress] = #program + 1
+          end
+          local timeTicks = channel.timeTicks or 0
+          local speed = eventSpeed(channel)
+          local tempo = engine.tempo or 0x100
+          local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
+          if length < 1 then length = 1 end
+          local eventStartTicks = emittedTicks
+          emittedTicks = emittedTicks + length * speed * tempo
+          if tempo ~= lastTempo then
+            if hw == 1 then
+              recordTempo(eventStartTicks, tempo)
+              program[#program + 1] = { tempo = tempo }
+            end
+            lastTempo = tempo
+          end
+          if speed ~= lastSpeed then
+            program[#program + 1] = { notetype = { speed = speed } }
+            lastSpeed = speed
+          end
+          if event.silence then
+            program[#program + 1] = { rest = length }
+          elseif event.noise then
+            if event.drum then
+              local drumId = drumIds[event.drum]
+              if not drumId then
+                drumId = #src.drums + 1
+                if drumId > 255 then drumId = 255 end
+                src.drums[drumId] = drumRows(
+                  event.drum, channel.frameTicks, ChipSynth.SAMPLE_RATE)
+                drumIds[event.drum] = drumId
+              end
+              program[#program + 1] = { drum = drumId, len = length }
+            else
+              program[#program + 1] = {
+                noiseNote = {
+                  len = length,
+                  volume = event.volume or 12,
+                  fade = event.fade or 0,
+                  parameter = event.noiseParameter or 0,
+                },
+              }
+            end
+          end
+        end
+      end
+      decode()
+      if #program > 0 then
+        local sourceTarget, loopTo = resolveLoop(program,
+          eventProgramIndices, channel, decode, id, hw, def.address)
+        local srcChannel = { hw = hw, program = program }
+        if sourceTarget then
+          program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
+        else
+          noLoop[#noLoop + 1] = { srcChannel = srcChannel,
+            tempo = lastTempo or engine.tempo or 0x100 }
+        end
+        if #program > 0 then
+          src.channels[#src.channels + 1] = srcChannel
         end
       end
       channel.byte = readByte
-      if #program > 0 then
-        local sourceTarget = stoppedLoopTarget(channel)
-        if sourceTarget then
-          local loopTo = eventProgramIndices[sourceTarget]
-          if not loopTo then
-            mod.log:warn(
-              "music_improvement: couldn't map loop target %04X for %s channel %d",
-              sourceTarget, id, hw)
-            loopTo = 1
-          end
-          program[#program + 1] = { loop = { count = 0, to = loopTo } }
-        end
-        src.channels[#src.channels + 1] = { hw = hw, program = program }
-      end
     else
       local program = {}
       local lastDuty, lastNotetypeKey, lastOctave, lastTempo =
-        nil, nil, nil, nil
+        nil, nil, nil, src.tempo
       local emittedTicks = 0
       local guard = 0
-      while true do
-        if channel.noise or channel.ended then break end
-        guard = guard + 1
-        if guard > 4096 then break end
-        local sourceAddress = channel.address
-        stepIndex = #program + 1
-        local okEvent, event = pcall(function() return channel:nextEvent() end)
-        if not okEvent or event == nil then break end
-        if type(sourceAddress) == "number" then
-          eventProgramIndices[sourceAddress] = #program + 1
-        end
-        local timeTicks = channel.timeTicks or 0
-        local speed = eventSpeed(channel)
-        local tempo = engine.tempo or 0x100
-        local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
-        if length < 1 then length = 1 end
-        emittedTicks = emittedTicks + length * speed * tempo
+      local decode
+      decode = function()
+        while true do
+          if channel.noise or channel.ended then break end
+          guard = guard + 1
+          if guard > 4096 then break end
+          if hw ~= 1 then
+            engine.tempo = tempoAt(channel.timeTicks or 0)
+          end
+          local sourceAddress = channel.address
+          stepIndex = #program + 1
+          local okEvent, event = pcall(function() return channel:nextEvent() end)
+          if not okEvent or event == nil then break end
+          if type(sourceAddress) == "number" then
+            eventProgramIndices[sourceAddress] = #program + 1
+          end
+          local timeTicks = channel.timeTicks or 0
+          local speed = eventSpeed(channel)
+          local tempo = engine.tempo or 0x100
+          local length = math.floor((timeTicks - emittedTicks) / (speed * tempo) + 0.5)
+          if length < 1 then length = 1 end
+          local eventStartTicks = emittedTicks
+          emittedTicks = emittedTicks + length * speed * tempo
 
-        if tempo ~= lastTempo then
-          program[#program + 1] = { tempo = tempo }
-          lastTempo = tempo
-        end
-        local notetype, notetypeKey
-        if channel.wave then
-          local level = waveLevelCode(event.waveLevel or channel.waveLevel)
-          local instrument = math.max(0,
-            math.min(15, event.waveInstrument or channel.waveInstrument or 0))
-          notetypeKey = table.concat({
-            "wave", tostring(speed), tostring(level), tostring(instrument),
-          }, ":")
-          notetype = {
-            speed = speed,
-            waveLevel = level,
-            waveInstrument = instrument,
-          }
-        else
-          local volume = event.volume
-          if volume == nil then volume = channel.volume end
-          local fade = event.fade
-          if fade == nil then fade = channel.fade end
-          volume = volume or 12
-          fade = fade or 0
-          notetypeKey = table.concat({
-            "square", tostring(speed), tostring(volume), tostring(fade),
-          }, ":")
-          notetype = { speed = speed, volume = volume, fade = fade }
-        end
-        if notetypeKey ~= lastNotetypeKey then
-          program[#program + 1] = { notetype = notetype }
-          lastNotetypeKey = notetypeKey
-        end
-        if event.silence then
-          program[#program + 1] = { rest = length }
-        else
-          local dutyVal = 2
-          if type(event.duty) == "table" then dutyVal = event.duty[1] or 2 end
-          dutyVal = tonumber(event.duty) or dutyVal
-          dutyVal = math.max(0, math.min(3, dutyVal))
-          if dutyVal ~= lastDuty then
-            program[#program + 1] = { duty = dutyVal }
-            lastDuty = dutyVal
+          if tempo ~= lastTempo then
+            if hw == 1 then
+              recordTempo(eventStartTicks, tempo)
+              program[#program + 1] = { tempo = tempo }
+            end
+            lastTempo = tempo
           end
-          local pitch, octave = registerToPitch(channel, event.register, channel.wave)
-          if octave ~= lastOctave then
-            program[#program + 1] = { octave = octave }
-            lastOctave = octave
+          local notetype, notetypeKey
+          if channel.wave then
+            local level = waveLevelCode(event.waveLevel or channel.waveLevel)
+            local instrument = math.max(0,
+              math.min(15, event.waveInstrument or channel.waveInstrument or 0))
+            notetypeKey = table.concat({
+              "wave", tostring(speed), tostring(level), tostring(instrument),
+            }, ":")
+            notetype = {
+              speed = speed,
+              waveLevel = level,
+              waveInstrument = instrument,
+            }
+          else
+            local volume = event.volume
+            if volume == nil then volume = channel.volume end
+            local fade = event.fade
+            if fade == nil then fade = channel.fade end
+            volume = volume or 12
+            fade = fade or 0
+            notetypeKey = table.concat({
+              "square", tostring(speed), tostring(volume), tostring(fade),
+            }, ":")
+            notetype = { speed = speed, volume = volume, fade = fade }
           end
-          program[#program + 1] = { pitch = pitch, len = length }
+          if notetypeKey ~= lastNotetypeKey then
+            program[#program + 1] = { notetype = notetype }
+            lastNotetypeKey = notetypeKey
+          end
+          if event.silence then
+            program[#program + 1] = { rest = length }
+          else
+            local dutyVal = 2
+            if type(event.duty) == "table" then dutyVal = event.duty[1] or 2 end
+            dutyVal = tonumber(event.duty) or dutyVal
+            dutyVal = math.max(0, math.min(3, dutyVal))
+            if dutyVal ~= lastDuty then
+              program[#program + 1] = { duty = dutyVal }
+              lastDuty = dutyVal
+            end
+            local pitch, octave = registerToPitch(channel, event.register, channel.wave)
+            if octave ~= lastOctave then
+              program[#program + 1] = { octave = octave }
+              lastOctave = octave
+            end
+            program[#program + 1] = { pitch = pitch, len = length }
+          end
+        end
+      end
+      decode()
+      if #program > 0 then
+        local sourceTarget, loopTo = resolveLoop(program,
+          eventProgramIndices, channel, decode, id, hw, def.address)
+        local srcChannel = { hw = hw, program = program }
+        if sourceTarget then
+          program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
+        else
+          noLoop[#noLoop + 1] = { srcChannel = srcChannel,
+            tempo = lastTempo or engine.tempo or 0x100 }
+        end
+        if #program > 0 then
+          src.channels[#src.channels + 1] = srcChannel
         end
       end
       channel.byte = readByte
-      if #program > 0 then
-        local sourceTarget = stoppedLoopTarget(channel)
-        if sourceTarget then
-          local loopTo = eventProgramIndices[sourceTarget]
-          if not loopTo then
-            mod.log:warn(
-              "music_improvement: couldn't map loop target %04X for %s channel %d",
-              sourceTarget, id, hw)
-            loopTo = 1
-          end
-          program[#program + 1] = { loop = { count = 0, to = loopTo } }
+    end
+  end
+  -- Pad no-source-loop channels to the longest generated playback duration so
+  -- the whole song restarts in sync.  Measuring the first translation (rather
+  -- than trusting per-event emittedTicks) avoids Gen2 frame-carry drift.
+  if #noLoop > 0 then
+    local firstTranslated = translate(src, settings)
+    if firstTranslated and firstTranslated.chip and firstTranslated.chip.channels then
+      local durations = {}
+      local measureEngine = ChipSynth.newEngine({ audio = {} }, firstTranslated,
+        { allowLoops = false })
+      for i, channel in ipairs(measureEngine.channels) do
+        local n=0
+        while true do
+          local e = channel:nextEvent()
+          if not e then break end
+          n=n+1
+          if n>1000000 then break end
         end
-        src.channels[#src.channels + 1] = { hw = hw, program = program }
+        durations[i] = channel.timeTicks or 0
+      end
+      local maxDur = 0
+      for _, entry in ipairs(noLoop) do
+        for i, channel in ipairs(src.channels) do
+          if channel == entry.srcChannel then
+            entry._index = i
+            if (durations[i] or 0) > maxDur then maxDur = durations[i] end
+          end
+        end
+      end
+      for _, entry in ipairs(noLoop) do
+        local duration = entry._index and durations[entry._index] or 0
+        local tempo = entry.tempo or 0x100
+        local pad = maxDur - duration
+        if id:match("GoldSilverOpening") then
+        end
+        if id:match("GoldSilverOpening") then
+        end
+        if pad > 0 and tempo > 0 and entry.srcChannel
+            and entry.srcChannel.program then
+          local units = math.floor(pad / tempo + 0.5)
+          if id:match("GoldSilverOpening") then
+          end
+          if units > 0 then
+            entry.srcChannel.program[#entry.srcChannel.program + 1] =
+              { notetype = { speed = 1 } }
+            while units > 0 do
+              local chunk = math.min(16, units)
+              entry.srcChannel.program[#entry.srcChannel.program + 1] =
+                { rest = chunk }
+              units = units - chunk
+            end
+          end
+        end
+        if entry.srcChannel and entry.srcChannel.program then
+          entry.srcChannel.program[#entry.srcChannel.program + 1] =
+            { loop = { count = 0, to = 1 } }
+        end
       end
     end
+  end
+  if id:match("GoldSilverOpening") then
+  end
+  if id:match("GoldSilverOpening") then
+    local p = src.channels[2] and src.channels[2].program
+    if p then
+      for i = math.max(1, #p - 6), #p do
+        local e = p[i]
+        io.stderr:write(string.format(" %s", e.loop and ("loop" .. tostring(e.loop.to)) or e.rest and ("rest" .. tostring(e.rest)) or "ev"))
+      end
+    end
+    io.stderr:write("\n")
   end
   local translated = translate(src, settings)
     if translated then
