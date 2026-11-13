@@ -30,6 +30,8 @@ M.EQUIVALENTS = {
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN" },
   { gen1 = "Music_TitleScreen", gen3 = "MUS_TITLE", hosts = { "firered", "leafgreen" },
       hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
+  { gen1 = "Music_IntroBattle", gen3 = "MUS_INTRO_FIGHT", hosts = { "firered", "leafgreen" },
+      hostSources = { firered = { "red" }, leafgreen = { "blue" } }, oneshot = true },
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER" },
   { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON" },
   { gen1 = "Music_Vermilion", gen2 = "Music_VermilionCity", gen3 = "MUS_VERMILLION" },

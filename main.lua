@@ -124,6 +124,8 @@ return function(mod)
   local extraDefs = {}
   local function registerTranslation(def, settings, id, sourceData, extraKey)
     id = id or "Music_PalletTown"
+    local oneshot = (versions and versions.groupFor and
+      (versions.groupFor(id) or {}).oneshot == true)
     if type(def) ~= "table" or type(def.address) ~= "number"
         or type(def.bank) ~= "number" then
       return nil
@@ -350,7 +352,7 @@ return function(mod)
           eventProgramIndices, channel, decode, id, hw, def.address)
         local srcChannel = { hw = hw, program = program }
         if sourceTarget then
-          program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
+          if not oneshot then program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } } end
         else
           noLoop[#noLoop + 1] = { srcChannel = srcChannel,
             tempo = lastTempo or engine.tempo or 0x100 }
@@ -452,7 +454,7 @@ return function(mod)
           eventProgramIndices, channel, decode, id, hw, def.address)
         local srcChannel = { hw = hw, program = program }
         if sourceTarget then
-          program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } }
+          if not oneshot then program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } } end
         else
           noLoop[#noLoop + 1] = { srcChannel = srcChannel,
             tempo = lastTempo or engine.tempo or 0x100 }
@@ -516,7 +518,7 @@ return function(mod)
             end
           end
         end
-        if entry.srcChannel and entry.srcChannel.program then
+        if (not oneshot) and entry.srcChannel and entry.srcChannel.program then
           entry.srcChannel.program[#entry.srcChannel.program + 1] =
             { loop = { count = 0, to = 1 } }
         end
