@@ -123,6 +123,12 @@ function M.install(deps)
 
   function Audio.playSong(id, opts)
     opts = opts or {}
+    -- Suppress music during the quest-log recap (B&W location recap).
+    if deps.isQuestLog and deps.isQuestLog() then
+      resetBus()
+      pending = nil
+      return true
+    end
     local resolved = Audio.resolveSong(id)
     if resolved == nil or resolved == 0 or resolved == 0xFFFF then
       resetBus()

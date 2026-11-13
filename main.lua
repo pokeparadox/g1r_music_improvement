@@ -1719,6 +1719,7 @@ return function(mod)
           enabledListFor = enabledListFor,
           extraAudio = extra,
           toast = showToast,
+          isQuestLog = function() return readyGame ~= nil and readyGame.phase == "quest_log" end,
         })
       end
     end
