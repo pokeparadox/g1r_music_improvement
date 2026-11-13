@@ -13,7 +13,7 @@ function baseSource:isPlaying() return self.playing end
 function baseSource:getVolume() return self.volume or 1 end
 
 local sources = {}
-local initialFree = 1000
+local initialFree
 local failQueue = false
 local synth = { SAMPLE_RATE = 1000, engines = {} }
 function synth.newEngine()
@@ -43,7 +43,7 @@ love = {
   audio = {
     newQueueableSource = function(_, _, _, bufferCount)
       local source = {
-        free = initialFree,
+        free = initialFree or bufferCount,
         bufferCount = bufferCount,
         playing = false,
         queued = 0,
@@ -124,50 +124,34 @@ baseSource.playing = true
 audio.update()
 now = 204
 audio.update()
-check(engine.samples < 14000, "resuming after a long pause does not fast-forward")
+check(engine.samples - beforePause < 4096, "resuming after a long pause does not fast-forward")
 audio.stop()
 
 -- A full queue prevents synthesis; a failed queue keeps its PCM for retry.
 now = 300
-initialFree = 0
 failQueue = false
-baseSource.playing = true
+baseSource.playing = false
 audio = newAudio()
 engine = newExtra(audio, true)
+baseSource.playing = true
 audio.update()
-eq(engine.samples, 0, "a full output queue does not render and discard samples")
+eq(engine.samples, 8192, "a full output queue does not render and discard samples")
 
 sources[#sources].free = 1
+now = 300.5
 failQueue = true
 audio.update()
-eq(engine.samples, 512, "a queue failure retains one rendered chunk")
+eq(engine.samples, 8192 + 512, "a queue failure retains one rendered chunk")
 failQueue = false
 audio.update()
-eq(engine.samples, 512, "retry queues retained PCM without rendering it twice")
-eq(sources[#sources].queued, 1, "the retained chunk reaches the source on retry")
+eq(engine.samples, 8192 + 512, "retry queues retained PCM without rendering it twice")
+eq(sources[#sources].queued, 17, "the retained chunk reaches the source on retry")
 audio.stop()
-
--- A harmony start that arrives after base playback has begun aligns to the
--- source's playback cursor instead of assuming playback starts at sample zero.
-now = 350
-initialFree = 1000
-baseSource.samples = 4096
-function baseSource:tell(unit)
-  if unit == "samples" then return self.samples end
-  return self.samples / synth.SAMPLE_RATE
-end
-audio = newAudio()
-engine = newExtra(audio, true)
-audio.update()
-eq(engine.samples, 12288, "late harmony start skips the base source's played samples")
-audio.stop()
-baseSource.tell = nil
 
 -- When tell is unavailable, the supplied clock must represent the base
 -- Source's actual start time, not the earlier update that queued its first
 -- worker buffer.
 now = 375
-initialFree = 1000
 audio = newAudio()
 engine = newExtra(audio, true, now - 0.125)
 audio.update()
@@ -177,7 +161,6 @@ audio.stop()
 
 -- A non-looping one-shot uses the shorter lead; looping songs retain the
 -- longer lead needed for stall tolerance.
-initialFree = 1000
 now = 400
 audio = newAudio()
 engine = newExtra(audio, false)
@@ -195,7 +178,6 @@ audio.stop()
 -- A song fade-out lowers the base source volume directly; the harmony must
 -- follow the same ratio instead of staying at full volume.
 now = 600
-initialFree = 1000
 baseSource.volume = 0.7
 baseSource.playing = true
 audio = newAudio()
@@ -216,6 +198,26 @@ audio.update()
 eq(extraSource:getVolume(), 1, "harmony returns to full volume when the base does")
 audio.stop()
 baseSource.volume = nil
+
+-- A main-thread stall can drain the harmony queue while the base keeps
+-- playing. The next update must skip the missed base samples and restart the
+-- source, instead of staying permanently behind.
+now = 700
+baseSource.playing = true
+audio = newAudio()
+engine = newExtra(audio, true)
+audio.update()
+local stalledSource = sources[#sources]
+local beforeResync = engine.samples
+stalledSource.free = stalledSource.bufferCount
+now = 710 -- ten seconds of base audio; harmony queue is dry
+audio.update()
+local skipped = 10000 - beforeResync
+eq(engine.samples, beforeResync + skipped + 8192,
+  "underrun skips the missed base samples and refills the lead")
+check(sources[#sources] ~= stalledSource, "underrun rebuilds the harmony source")
+audio.stop()
+baseSource.playing = true
 
 package.loaded["src.core.ChipSynth"] = previousSynth
 package.loaded["src.core.ChipAudio"] = previousAudio

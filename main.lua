@@ -1218,12 +1218,40 @@ return function(mod)
   -- from sample zero. Fallback paths still wait for the base to play.
   local pendingExtra
   local pendingLooping = true
+  local suppressExtra = false
+  local cpuEma = 0
+  local cpuOverSince = nil
+  local guardIgnoreUntil = 0
   local function g1rClock()
     if love and love.timer and type(love.timer.getTime) == "function" then
       local ok, t = pcall(love.timer.getTime)
       if ok and type(t) == "number" then return t end
     end
     return os.clock()
+  end
+
+  -- A long main-thread stall (voxel cache encode/storage, GPU upload, GC)
+  -- drains the harmony queue faster than it can be repaired. Stop the extra
+  -- voices for this song instead of drifting; music.started retries them.
+  local function frameGuard(dt)
+    if not extraAudio or not extraAudio.isActive() then return end
+    if type(dt) ~= "number" or dt <= 0 then return end
+    local now = g1rClock()
+    if now < guardIgnoreUntil then return end
+    cpuEma = cpuEma * 0.9 + dt * 0.1
+    local over = dt > 0.5 or cpuEma > 0.035
+    if over then
+      cpuOverSince = cpuOverSince or now
+    else
+      cpuOverSince = nil
+    end
+    if over and (dt > 0.5 or now - cpuOverSince >= 1.0) then
+      suppressExtra = true
+      cpuOverSince = nil
+      pcall(extraAudio.stop)
+      mod.log:info("music_improvement: harmony paused until next song (%.0fms frame)",
+                   dt * 1000)
+    end
   end
 
   -- Base audio starts inside ChipAudio.update, before game.update returns.
@@ -1268,13 +1296,17 @@ return function(mod)
     currentSong = song
     currentReason = payload and payload.reason
     currentImproved = (type(song) == "string" and song:match("^Music_Improved") ~= nil)
+    suppressExtra = false
+    cpuEma = 0
+    cpuOverSince = nil
     if extraAudio then
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
       local enhancementActive = mod.options:get("enabled") ~= false
-        and not state.skipped and not state.pending
+        and not state.skipped and not state.pending and not suppressExtra
       if extra and enhancementActive then
         pendingLooping = currentReason ~= "once"
+        guardIgnoreUntil = g1rClock() + 2
         local basePlaying = false
         if okChipAudio and type(ChipAudio.currentSource) == "function" then
           local okSource, source = pcall(ChipAudio.currentSource)
@@ -1345,10 +1377,14 @@ return function(mod)
         state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
       end
       local result = nextUpdate(self, dt)
+      frameGuard(dt)
       -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
       -- Start harmony after it, in the same frame, instead of one frame late.
       if extraAudio then
-        if mod.options:get("enabled") ~= false then
+        if suppressExtra then
+          pendingExtra = nil
+          if extraAudio.isActive() then pcall(extraAudio.stop) end
+        elseif mod.options:get("enabled") ~= false then
           pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
           if pendingExtra and okChipAudio and type(ChipAudio.currentSource) == "function" then
             local okSource, source = pcall(ChipAudio.currentSource)

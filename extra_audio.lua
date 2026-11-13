@@ -13,6 +13,14 @@ return function()
     return os.clock()
   end
 
+  local BUFFER_COUNT = 16
+  local LEAD_LOOP = 8192
+  local LEAD_ONCE = 2048
+  local DRIFT_TOL = math.floor(SAMPLE_RATE * 0.12)
+  local MAX_SKIP = math.floor(SAMPLE_RATE * 2)
+  local MAX_RESYNCS = 3
+  local RESYNC_WINDOW = 30
+
   local state = {
     engines = {},
     sideEnabled = { left = true, center = true, right = true },
@@ -25,11 +33,16 @@ return function()
     baseLastClock = 0,
     baseWasPlaying = false,
     extraRendered = 0,
-    lead = 8192,
+    lead = LEAD_LOOP,
+    bufferCount = BUFFER_COUNT,
     pendingBuffer = nil,
     pendingSamples = 0,
     baseVolumeRef = nil,
     fadeScale = 1,
+    paused = false,
+    resyncCount = 0,
+    resyncSince = 0,
+    givenUp = false,
   }
 
   local function isPlaying(src)
@@ -48,6 +61,10 @@ return function()
     state.baseWasPlaying = false
     state.pendingBuffer = nil
     state.pendingSamples = 0
+    state.paused = false
+    state.resyncCount = 0
+    state.resyncSince = 0
+    state.givenUp = false
   end
 
   local function currentBaseSource()
@@ -58,17 +75,19 @@ return function()
     return nil
   end
 
-  local function basePositionSamples(source)
-    if not source or type(source.tell) ~= "function" then return nil end
-    local ok, samples = pcall(source.tell, source, "samples")
-    if ok and type(samples) == "number" and samples >= 0 then
-      return samples
-    end
-    local okSeconds, seconds = pcall(source.tell, source)
-    if okSeconds and type(seconds) == "number" and seconds >= 0 then
-      return seconds * SAMPLE_RATE
-    end
-    return nil
+  -- Queueable Source:tell() only reports the position inside the buffer that
+  -- is playing right now, not the song cursor. Use the wall clock while the
+  -- base source plays instead; its worker queue keeps running through stalls.
+
+  -- Samples already consumed by the audio device. QueueableSource exposes
+  -- free slots, not a play cursor, so derive it from what we queued.
+  local function sourcePlayed()
+    if not state.source then return state.extraRendered end
+    local okFree, free = pcall(state.source.getFreeBufferCount, state.source)
+    if not okFree or type(free) ~= "number" then return state.extraRendered end
+    local capacity = state.bufferCount or BUFFER_COUNT
+    local queued = math.max(0, math.min(capacity, capacity - free))
+    return state.extraRendered - queued * state.chunk
   end
 
   local function queuePending()
@@ -183,6 +202,68 @@ return function()
     return queuePending()
   end
 
+  local function newExtraSource()
+    local buffers = state.bufferCount or BUFFER_COUNT
+    local ok6, src6 = pcall(love.audio.newQueueableSource,
+                            ChipSynth.SAMPLE_RATE, 16, 6, buffers)
+    if ok6 and src6 then return src6, 6 end
+    local ok2, src2 = pcall(love.audio.newQueueableSource,
+                            ChipSynth.SAMPLE_RATE, 16, 2, buffers)
+    if ok2 and src2 then return src2, 2 end
+    return nil, nil
+  end
+
+  local function discardSamples(samples)
+    if samples <= 0 then return end
+    local remaining = samples
+    for _, engine in pairs(state.engines) do
+      remaining = samples
+      while remaining > 0 do
+        local step = math.min(state.chunk, remaining)
+        pcall(ChipSynth.soundData, engine, step, 1)
+        remaining = remaining - step
+      end
+    end
+  end
+
+  local function fillTo(target)
+    local guard = 0
+    while state.extraRendered < target and guard < 128 do
+      guard = guard + 1
+      if not renderChunk() then break end
+    end
+  end
+
+  -- Rebuild the source at the base cursor after the harmony queue ran dry.
+  -- Cannot rewind, so only a forward gap is repairable.
+  local function resync(basePos)
+    local gap = basePos - state.extraRendered
+    if gap < 0 or gap > MAX_SKIP then return false end
+    local now = clock()
+    if now - state.resyncSince > RESYNC_WINDOW then
+      state.resyncSince = now
+      state.resyncCount = 0
+    end
+    state.resyncCount = state.resyncCount + 1
+    if state.resyncCount > MAX_RESYNCS then return false end
+
+    if state.source then pcall(state.source.stop, state.source) end
+    state.source = nil
+    state.pendingBuffer = nil
+    state.pendingSamples = 0
+    discardSamples(gap)
+    state.extraRendered = basePos
+
+    local src, channels = newExtraSource()
+    if not src then return false end
+    state.source = src
+    state.channels = channels
+    state.paused = false
+    fillTo(basePos + state.lead)
+    pcall(src.play, src)
+    return true
+  end
+
   local function start(song, data, basePlayClock, looping)
     stop()
     if type(song) ~= "table" then return end
@@ -196,45 +277,21 @@ return function()
       end
     end
     if next(state.engines) == nil then return end
-    local src = nil
-    local channels = 2
-    local ok6, src6 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 6, 16)
-    if ok6 and src6 then
-      src = src6
-      channels = 6
-    else
-      local ok2, src2 = pcall(love.audio.newQueueableSource, ChipSynth.SAMPLE_RATE, 16, 2, 16)
-      if ok2 and src2 then
-        src = src2
-        channels = 2
-      end
-    end
+    state.bufferCount = BUFFER_COUNT
+    local src, channels = newExtraSource()
     if not src then return end
     state.source = src
     state.channels = channels
     state.lpfState = 0
-    state.lead = (looping == false) and 2048 or 8192
+    state.lead = (looping == false) and LEAD_ONCE or LEAD_LOOP
     local startedAt = clock()
-    local baseSrc = currentBaseSource()
-    local played = basePositionSamples(baseSrc)
-    if played ~= nil then
-      state.baseElapsed = played
-    elseif type(basePlayClock) == "number" then
+    if type(basePlayClock) == "number" then
       state.baseElapsed = math.max(0, (startedAt - basePlayClock) * SAMPLE_RATE)
     else
       state.baseElapsed = 0
     end
-    -- Align generated harmony to the base source's playback position when
-    -- available; the clock estimate is only a fallback for new sources.
     local skip = math.floor(state.baseElapsed)
-    for _, engine in pairs(state.engines) do
-      local remaining = skip
-      while remaining > 0 do
-        local n = math.min(state.chunk, remaining)
-        pcall(ChipSynth.soundData, engine, n, 1)
-        remaining = remaining - n
-      end
-    end
+    discardSamples(skip)
     state.extraRendered = skip
     state.baseLastClock = startedAt
     local baseSrc = currentBaseSource()
@@ -242,23 +299,21 @@ return function()
     -- Base is still buffering (threaded start): render the lead now so both
     -- sources can begin on the same sample, not one update later.
     if not state.baseWasPlaying then
-      local guard = 0
-      while state.extraRendered < state.lead and guard < 64 do
-        guard = guard + 1
-        if not renderChunk() then break end
-      end
+      fillTo(skip + state.lead)
     end
   end
 
   local function update()
-    if not state.source then return end
+    if not state.source or state.givenUp then return end
     local now = clock()
-    if state.baseWasPlaying then
+    local baseSrc = currentBaseSource()
+    local basePlaying = isPlaying(baseSrc)
+    if basePlaying and state.baseWasPlaying then
       local elapsed = now - state.baseLastClock
       if elapsed > 0 then state.baseElapsed = state.baseElapsed + elapsed * SAMPLE_RATE end
     end
     state.baseLastClock = now
-    local baseSrc = currentBaseSource()
+    state.baseWasPlaying = basePlaying
     -- Music.fadeOut ramps the base source volume directly, bypassing the
     -- music.volume hook. Follow that ratio so the harmony fades with it.
     if baseSrc and type(baseSrc.getVolume) == "function" then
@@ -272,18 +327,39 @@ return function()
         end
       end
     end
-    local basePlaying = isPlaying(baseSrc)
-    state.baseWasPlaying = basePlaying
 
-    if basePlaying then
-      local target = state.baseElapsed + state.lead
-      local guard = 0
-      while state.extraRendered < target and guard < 64 do
-        guard = guard + 1
-        if not renderChunk() then break end
+    local basePos = state.baseElapsed
+    local drift = sourcePlayed() - basePos
+
+    if state.paused then
+      if not basePlaying then
+        if isPlaying(state.source) then pcall(state.source.pause, state.source) end
+        return
+      end
+      if (not drift) or drift <= 0 then
+        state.paused = false
+        pcall(state.source.play, state.source)
+      else
+        return
       end
     end
-    if basePlaying and not isPlaying(state.source) then
+
+    if basePlaying and drift then
+      if drift < -DRIFT_TOL then
+        if not resync(basePos) then
+          if state.source then pcall(state.source.stop, state.source) end
+          state.givenUp = true
+          return
+        end
+      elseif drift > DRIFT_TOL then
+        pcall(state.source.pause, state.source)
+        state.paused = true
+        return
+      end
+    end
+
+    if basePlaying then fillTo(state.baseElapsed + state.lead) end
+    if basePlaying and not isPlaying(state.source) and not state.paused then
       pcall(state.source.play, state.source)
     elseif (not basePlaying) and isPlaying(state.source) then
       pcall(state.source.pause, state.source)
@@ -315,10 +391,15 @@ return function()
     if n then state.baseVolumeRef = n end
   end
 
+  local function isActive()
+    return state.source ~= nil and not state.givenUp
+  end
+
   return {
     start = start,
     stop = stop,
     update = update,
+    isActive = isActive,
     setExtraGain = setExtraGain,
     setSideEnabled = setSideEnabled,
     setMusicVolume = setMusicVolume,
