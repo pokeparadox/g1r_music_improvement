@@ -193,8 +193,8 @@ function M.install(deps)
     -- Filter by shuffle mode.
     local eligible = {}
     for _, rec in ipairs(records) do
-      local improved = tostring(rec.id):match("^Music_Improved") ~= nil
-      local stock = tostring(rec.id):match("^Music_Stock") ~= nil
+      local improved = tostring(rec.id or ""):match("^Music_Improved") ~= nil
+      local stock = tostring(rec.id or ""):match("^Music_Stock") ~= nil
       if settings.source == "shuffle_improved" and improved then
         eligible[#eligible + 1] = rec
       elseif settings.source == "shuffle_stock" and stock then
@@ -202,6 +202,10 @@ function M.install(deps)
       else
         eligible[#eligible + 1] = rec
       end
+    end
+    -- shuffle_all also rotates the native GBA version.
+    if settings.source == "shuffle_all" then
+      eligible[#eligible + 1] = { native = true, key = "native:" .. tostring(nativeId) }
     end
     local record = nil
     if #eligible > 0 then
@@ -212,7 +216,14 @@ function M.install(deps)
         lastPick[nativeId] = picked.key
       else
         record = eligible[1]
+        lastPick[nativeId] = record.key
       end
+    end
+    if record and record.native then
+      pending = nil
+      if chip.id then resetBus() end
+      if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved)) end
+      return originalPlay(id, opts)
     end
     if record then
       resetBus()
