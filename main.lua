@@ -47,6 +47,8 @@ return function(mod)
 
   local improveModule = loadModFile("improve.lua")
   if not improveModule then return end
+  local versions = loadModFile("versions.lua")
+  if not versions then return end
   local improve = function(src, settings) return improveModule.improve(src, settings) end
   local extraSpec = function(src, settings) return improveModule.extra(src, settings) end
   local serialize = loadModFile("serialize.lua")
@@ -61,6 +63,7 @@ return function(mod)
   local function currentSettings()
     return {
       enabled = mod.options:get("enabled") ~= false,
+      source = mod.options:get("source") or "native",
     }
   end
 
@@ -115,13 +118,13 @@ return function(mod)
   end
 
   local extraDefs = {}
-  local function registerTranslation(def, settings, id)
+  local function registerTranslation(def, settings, id, sourceData, extraKey)
     id = id or "Music_PalletTown"
     if type(def) ~= "table" or type(def.address) ~= "number"
         or type(def.bank) ~= "number" then
       return nil
     end
-    local data = musicData()
+    local data = sourceData or musicData()
     if not okChipSynth or type(ChipSynth) ~= "table"
         or type(ChipSynth.newEngine) ~= "function"
         or type(data) ~= "table" then
@@ -134,6 +137,7 @@ return function(mod)
     end
     local okEngine, engine = pcall(ChipSynth.newEngine, data, {
       address = def.address, bank = def.bank, engine = engineType,
+      generation = def.generation,
     }, { allowLoops = false })
     if not okEngine or type(engine) ~= "table" or not engine.channels then
       mod.log:warn("music_improvement: ChipSynth.newEngine failed for %s: %s", id, tostring(engine))
@@ -544,7 +548,7 @@ return function(mod)
         end
         if next(extraSong) then
           translated.extra = extraSong
-          extraDefs[id] = extraSong
+          extraDefs[extraKey or id] = extraSong
         end
       end
     end
@@ -554,6 +558,11 @@ return function(mod)
   mod.options:define({
     { key = "enabled", type = "toggle", label = "ENABLE IMPROVEMENTS", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
+    { key = "source", type = "choice", label = "MUSIC VERSION", default = "native",
+      choices = {
+        { "NATIVE", "native" }, { "SHUFFLE", "shuffle" },
+        { "GEN 1", "gen1" }, { "GEN 2", "gen2" },
+      } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
       default = 7, min = 0, max = 7, step = 1 },
     { key = "extra_volume", type = "number", label = "EXTRA HARMONY MIX",
@@ -575,6 +584,10 @@ return function(mod)
   local settings = currentSettings()
   local improvedMap = {}
   local stagedImprovedMap = {}
+  local variantMap = {}
+  local variantByKey = {}
+  local lastVariant = {}
+  local sourceCache = {}
   local currentImproved = false
   local currentSong
   local currentReason
@@ -601,8 +614,7 @@ return function(mod)
   -- Content registries freeze at the loader's merge boundary.  Songs built
   -- after that (first cache fill, regeneration) must still reach the live
   -- Data table or every mapped cue resolves to a missing def.
-  local function registerImproved(id, def)
-    local improvedId = improvedIdFor(id)
+  local function registerImprovedId(improvedId, def)
     local okReg = pcall(mod.content.music.register, mod.content.music, improvedId, def)
     if not okReg then
       pcall(mod.content.music.override, mod.content.music, improvedId, def)
@@ -614,6 +626,10 @@ return function(mod)
       data.audio.songs[improvedId] = def
     end
     return improvedId
+  end
+
+  local function registerImproved(id, def)
+    return registerImprovedId(improvedIdFor(id), def)
   end
 
   local function settingsHash(s)
@@ -636,6 +652,114 @@ return function(mod)
   local function cachePath(id, hash)
     local safeId = tostring(id):gsub("[^%w_]", "_")
     return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeId .. ".lua"
+  end
+
+  -- A dataset view is a detached, data-only copy.  Build the same synthetic
+  -- audio table ChipSynth expects from it; translated chip defs need no source
+  -- bytes at playback time, but the initial decode does.
+  local function sourceFor(version)
+    if sourceCache[version] ~= nil then return sourceCache[version] or nil end
+    sourceCache[version] = false
+    if not mod.datasets or type(mod.datasets.open) ~= "function" then return nil end
+    local ok, view = pcall(mod.datasets.open, mod.datasets, version)
+    if not ok or type(view) ~= "table" then return nil end
+    local okAudio, audio = pcall(function() return view.content.audio end)
+    local okMusic, music = pcall(function() return view.content.music end)
+    if not okAudio or not audio or not okMusic or not music then return nil end
+    local okGet, programFile = pcall(audio.get, audio, "programFile")
+    if not okGet or not programFile then return nil end
+    local okPath, programPath = pcall(view.assets.path, view.assets, programFile)
+    if not okPath or not programPath then return nil end
+    local data = {
+      audio = {
+        generation = view.generation,
+        gen2 = view.generation == 2,
+        programFile = programPath,
+        bankOrder = audio:get("bankOrder"),
+        waveBanks = audio:get("waveBanks"),
+      },
+    }
+    if view.generation == 1 then
+      data.audio.noiseHeaders = audio:get("noiseHeaders")
+    else
+      data.audio.drumkits = audio:get("drumkits")
+    end
+    local source = { view = view, data = data }
+    sourceCache[version] = source
+    return source
+  end
+
+  local function sourceHasSong(source, label)
+    if not source then return false end
+    local music = source.view.content.music
+    if type(music.has) == "function" then
+      local ok, has = pcall(music.has, music, label)
+      return ok and has == true
+    end
+    local ok, def = pcall(music.get, music, label)
+    return ok and def ~= nil
+  end
+
+  local function variantIdFor(nativeId, version)
+    local suffix = tostring(nativeId):gsub("^Music_", ""):gsub("^MUS_", "")
+    return "Music_Improved" .. suffix .. "_" .. tostring(version)
+  end
+
+  local function variantKeyFor(candidate)
+    return tostring(candidate.version) .. ":" .. tostring(candidate.label)
+  end
+
+  local function rememberVariant(nativeId, candidate, def, improvedId)
+    local key = variantKeyFor(candidate)
+    local record = {
+      key = key,
+      id = improvedId,
+      def = def,
+      extra = extraDefs[improvedId],
+      version = candidate.version,
+      label = candidate.label,
+      generation = candidate.generation,
+    }
+    variantByKey[key] = record
+    local list = variantMap[nativeId]
+    if not list then list = {}; variantMap[nativeId] = list end
+    for index = #list, 1, -1 do
+      if list[index].key == key then table.remove(list, index) end
+    end
+    list[#list + 1] = record
+    return record
+  end
+
+  local function candidatesFor(nativeId, s)
+    if not s.enabled or s.source == "native" then return {} end
+    local hostGeneration = 1
+    if okGameVersion and GameVersion and GameVersion.generation then
+      hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
+    end
+    local list = versions.candidates(nativeId, hostGeneration, activeCacheGame,
+      function(version, label) return sourceHasSong(sourceFor(version), label) end)
+    local wanted = versions.generationForMode(s.source)
+    if not wanted then return list end
+    local filtered = {}
+    for _, candidate in ipairs(list) do
+      if candidate.generation == wanted then filtered[#filtered + 1] = candidate end
+    end
+    return filtered
+  end
+
+  local function loadVariant(nativeId, candidate, s)
+    if not candidate then return nil end
+    local key = variantKeyFor(candidate)
+    local existing = variantByKey[key]
+    if existing and existing.def then return existing end
+    local improvedId = variantIdFor(nativeId, candidate.version)
+    local cached = loadCached(cachePath(improvedId, settingsHash(s)))
+    if cached then
+      registerImprovedId(improvedId, cached)
+      extraDefs[improvedId] = cached.extra
+      return rememberVariant(nativeId, candidate, cached, improvedId)
+    end
+    return nil
   end
 
   local function cacheIndexFor(gameId)
@@ -783,7 +907,9 @@ return function(mod)
     if not chunk then return nil end
     local ok, def = pcall(chunk)
     if ok and type(def) == "table" and type(def.chip) == "table" then
-      local valid, engine = pcall(ChipSynth.newEngine, musicData(), def, { allowLoops = true })
+      local data = musicData()
+      if type(data) ~= "table" or type(data.audio) ~= "table" then data = { audio = {} } end
+      local valid, engine = pcall(ChipSynth.newEngine, data, def, { allowLoops = true })
       if valid and type(engine) == "table" then return def end
       mod.log:warn("music_improvement: invalid cached song %s: %s", path, tostring(engine))
     end
@@ -804,6 +930,17 @@ return function(mod)
     pcall(Music.play, musicData(), song, loop, { reason = currentReason or "map" })
   end
 
+  local function chooseVariant(nativeId)
+    local s = currentSettings()
+    if not s.enabled or s.source == "native" then return nil end
+    local list = variantMap[nativeId]
+    if not list or #list == 0 then return nil end
+    local picked = versions.pick(s.source, list, lastVariant[nativeId])
+    if not picked then return nil end
+    lastVariant[nativeId] = picked.key
+    return picked.id
+  end
+
   local function buildQueue(settings, force, game)
     local gameId = cacheGameId(game)
     if activeCacheGame ~= gameId then
@@ -816,9 +953,13 @@ return function(mod)
     originalDefs = {}
     improvedMap = {}
     stagedImprovedMap = {}
+    variantMap = {}
+    variantByKey = {}
+    lastVariant = {}
     extraDefs = {}
     completed = 0
     total = 0
+    local queuedVariant = {}
     state.skipped = false
     if settings.enabled == false then
       state.pending = false
@@ -849,6 +990,32 @@ return function(mod)
             extraDefs[improvedId] = cachedDef.extra
           else
             queue[#queue + 1] = id
+          end
+        end
+      end
+    end
+    if settings.source ~= "native" then
+      for _, id in ipairs(ids) do
+        if not tostring(id):match("^Music_Improved") and originalDefs[id] then
+          for _, candidate in ipairs(candidatesFor(id, settings)) do
+            local record = loadVariant(id, candidate, settings)
+            if record then
+              indexGeneratedCachePath(cachePath(record.id, hash))
+              extraDefs[record.id] = record.extra
+            else
+              local key = tostring(id) .. "|" .. variantKeyFor(candidate)
+              if not queuedVariant[key] then
+                queuedVariant[key] = true
+                queue[#queue + 1] = {
+                  kind = "variant",
+                  nativeId = id,
+                  improvedId = variantIdFor(id, candidate.version),
+                  version = candidate.version,
+                  label = candidate.label,
+                  generation = candidate.generation,
+                }
+              end
+            end
           end
         end
       end
@@ -914,57 +1081,99 @@ return function(mod)
     if startPreparation then startPreparation(game) end
   end
 
+  local function writeCached(cacheId, def)
+    if not serialize then return end
+    local okSer, bytes = pcall(serialize, def)
+    if not okSer or type(bytes) ~= "string" then return end
+    local path = cachePath(cacheId, settingsHash(settings))
+    if not indexGeneratedCachePath(path) then
+      mod.log:error("music_improvement: skipping unindexed cached file %s", path)
+      return
+    end
+    local okWrite, result, writeErr = pcall(mod.cache.write, mod.cache, path, bytes)
+    if not okWrite or result == false then
+      mod.log:error("music_improvement: failed to write cached file %s%s", path,
+        okWrite and ": " .. tostring(writeErr) or ": " .. tostring(result))
+    elseif cacheFileExists(path) ~= true then
+      mod.log:error("music_improvement: cached file is missing after write: %s", path)
+    end
+  end
+
+  local function prepareVariant(entry, s)
+    s = s or settings
+    local source = sourceFor(entry.version)
+    local def = source and source.view.content.music:get(entry.label)
+    local translated = registerTranslation(def, s, entry.label,
+      source and source.data, entry.improvedId)
+    if not translated then return nil end
+    local data = musicData()
+    if type(data) ~= "table" or type(data.audio) ~= "table" then data = { audio = {} } end
+    local okDef, defErr = pcall(ChipSynth.newEngine, data, translated,
+      { allowLoops = true })
+    if not okDef or type(defErr) ~= "table" then
+      mod.log:warn("music_improvement: generated variant invalid for %s: %s",
+        tostring(entry.label), tostring(defErr))
+      return nil
+    end
+    extraDefs[entry.improvedId] = translated.extra
+    registerImprovedId(entry.improvedId, translated)
+    local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId)
+    writeCached(entry.improvedId, translated)
+    return record
+  end
+
+  local function ensureVariant(nativeId, candidate, s)
+    local record = loadVariant(nativeId, candidate, s)
+    if record then return record end
+    return prepareVariant({
+      kind = "variant",
+      nativeId = nativeId,
+      improvedId = variantIdFor(nativeId, candidate.version),
+      version = candidate.version,
+      label = candidate.label,
+      generation = candidate.generation,
+    }, s)
+  end
+
   local function prepareOne(game)
     if #queue == 0 then
       state.pending = false
       return
     end
-    local id = table.remove(queue, 1)
+    local entry = table.remove(queue, 1)
+    local variant = type(entry) == "table" and entry or nil
+    local id = variant and variant.nativeId or entry
     local okPrepare, prepareErr = pcall(function()
-      local def = originalDefs[id]
-      local translated
-      if type(def) == "table" and type(def.address) == "number"
-          and type(def.bank) == "number" then
-        translated = registerTranslation(def, settings, id)
+      if variant then
+        prepareVariant(variant, settings)
       else
-        mod.log:warn("music_improvement: skipping %s (missing ROM address/bank)", tostring(id))
-      end
-      if translated then
-        local okDef, defErr = pcall(ChipSynth.newEngine, musicData(), translated,
-          { allowLoops = true })
-        if not okDef or type(defErr) ~= "table" then
-          mod.log:warn("music_improvement: generated song invalid for %s: %s",
-            tostring(id), tostring(defErr))
-          translated = nil
+        local def = originalDefs[id]
+        local translated
+        if type(def) == "table" and type(def.address) == "number"
+            and type(def.bank) == "number" then
+          translated = registerTranslation(def, settings, id)
+        else
+          mod.log:warn("music_improvement: skipping %s (missing ROM address/bank)", tostring(id))
         end
-      end
-      if translated then
-        if translated.extra then
-          extraDefs[id] = translated.extra
-          extraDefs[improvedIdFor(id)] = translated.extra
-        end
-        local improvedId = registerImproved(id, translated)
-        stagedImprovedMap[id] = improvedId
-        local hash = settingsHash(settings)
-        if serialize then
-          local okSer, bytes = pcall(serialize, translated)
-          if okSer and type(bytes) == "string" then
-            local path = cachePath(id, hash)
-            if indexGeneratedCachePath(path) then
-              local okWrite, result, writeErr =
-                pcall(mod.cache.write, mod.cache, path, bytes)
-              if not okWrite or result == false then
-                mod.log:error("music_improvement: failed to write cached file %s%s",
-                  path, okWrite and ": " .. tostring(writeErr)
-                    or ": " .. tostring(result))
-              elseif cacheFileExists(path) ~= true then
-                mod.log:error("music_improvement: cached file is missing after write: %s",
-                  path)
-              end
-            else
-              mod.log:error("music_improvement: skipping unindexed cached file %s", path)
-            end
+        if translated then
+          local data = musicData()
+          if type(data) ~= "table" or type(data.audio) ~= "table" then data = { audio = {} } end
+          local okDef, defErr = pcall(ChipSynth.newEngine, data, translated,
+            { allowLoops = true })
+          if not okDef or type(defErr) ~= "table" then
+            mod.log:warn("music_improvement: generated song invalid for %s: %s",
+              tostring(id), tostring(defErr))
+            translated = nil
           end
+        end
+        if translated then
+          if translated.extra then
+            extraDefs[id] = translated.extra
+            extraDefs[improvedIdFor(id)] = translated.extra
+          end
+          local improvedId = registerImproved(id, translated)
+          stagedImprovedMap[id] = improvedId
+          writeCached(id, translated)
         end
       end
     end)
@@ -1148,6 +1357,26 @@ return function(mod)
         end,
         activate = function(g) regenerateCache(g) end,
       },
+
+      {
+        id = "sfxVol",
+        musicImprovementId = "music_improvement_source",
+        label = "MUSIC VERSION",
+        value = function()
+          local source = mod.options:get("source") or "native"
+          return ({ native = "NATIVE", shuffle = "SHUFFLE",
+            gen1 = "GEN 1", gen2 = "GEN 2" })[source] or "NATIVE"
+        end,
+        activate = function(g)
+          local modes = { "native", "shuffle", "gen1", "gen2" }
+          local cur = mod.options:get("source") or "native"
+          local index = 1
+          for i, mode in ipairs(modes) do if mode == cur then index = i break end end
+          setModOption(g, "source", modes[index % #modes + 1])
+          buildQueue(currentSettings(), false, readyGame or g)
+          startPreparation(readyGame or g)
+        end,
+      },
     }
     if type(mod.ui.insertAfter) == "function" then
       local anchor = "SOUND"
@@ -1168,7 +1397,8 @@ return function(mod)
   if okMusic and type(Music.playOnce) == "function" then
     local corePlayOnce = Music.playOnce
     Music.playOnce = function(data, song)
-      local improved = type(song) == "string" and improvedMap[song] or nil
+      local improved = type(song) == "string"
+        and (improvedMap[song] or chooseVariant(song)) or nil
       if improved and mod.options:get("enabled") ~= false
           and not state.skipped then
         song = improved
@@ -1192,7 +1422,7 @@ return function(mod)
     if not ctx or ctx.reason == "jukebox" then
       return next(chosen, ctx)
     end
-    local improved = improvedMap[chosen]
+    local improved = improvedMap[chosen] or chooseVariant(chosen)
     if improved then
       return next(improved, ctx)
     end
@@ -1364,6 +1594,24 @@ return function(mod)
     readyGame = game
     settings = currentSettings()
     buildQueue(settings, false, game)
+    local generation = okGameVersion and GameVersion and GameVersion.generation
+      and GameVersion.generation(cacheGameId(game)) or 1
+    if generation == 3 then
+      local host = loadModFile("gen3.lua")
+      if host and type(host.install) == "function" then
+        local extra = extraAudio or {
+          start = function() end, stop = function() end,
+          setMusicVolume = function() end, setBaseVolume = function() end,
+        }
+        host.install({
+          versions = versions,
+          currentSettings = currentSettings,
+          candidatesFor = candidatesFor,
+          ensureVariant = ensureVariant,
+          extraAudio = extra,
+        })
+      end
+    end
     if type(game.update) ~= "function" or game._g1rMusicImprovementUpdateWrapped then
       return
     end
