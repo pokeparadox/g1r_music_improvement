@@ -30,8 +30,6 @@ M.EQUIVALENTS = {
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN" },
   { gen1 = "Music_TitleScreen", gen3 = "MUS_TITLE", hosts = { "firered", "leafgreen" },
       hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
-  { gen1 = "Music_IntroBattle", gen3 = "MUS_INTRO_FIGHT", hosts = { "firered", "leafgreen" },
-      hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER" },
   { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON" },
   { gen1 = "Music_Vermilion", gen2 = "Music_VermilionCity", gen3 = "MUS_VERMILLION" },
@@ -61,6 +59,8 @@ M.EQUIVALENTS = {
   { gen1 = "Music_CinnabarMansion", gen3 = "MUS_POKE_MANSION" },
 
   { gen1 = "Music_MeetProfOak", gen2 = "Music_ProfOak", gen3 = "MUS_OAK" },
+  { gen1 = "Music_OaksLab", gen3 = "MUS_OAK_LAB", hosts = { "firered", "leafgreen" },
+      hostSources = { firered = { "red", "blue", "yellow" }, leafgreen = { "red", "blue", "yellow" } } },
   { gen1 = "Music_DefeatedGymLeader", gen2 = "Music_GymLeaderVictory", gen3 = "MUS_VICTORY_GYM_LEADER" },
   { gen1 = "Music_DefeatedTrainer", gen2 = "Music_TrainerVictory", gen3 = "MUS_VICTORY_TRAINER" },
   { gen1 = "Music_DefeatedWildMon", gen2 = "Music_WildPokemonVictory", gen3 = "MUS_VICTORY_WILD" },
