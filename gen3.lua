@@ -59,7 +59,8 @@ function M.install(deps)
   local function candidateFor(nativeId, settings)
     -- Shuffle must roll again for every fresh playSong, so do not reuse a
     -- cached pick in that mode.
-    if settings.source ~= "shuffle" then
+    local isShuffle = tostring(settings.source or ""):match("^shuffle_") ~= nil
+    if not isShuffle then
       local cached = chosen[nativeId]
       if cached and cached.source == settings.source then
         return cached.candidate
@@ -139,8 +140,7 @@ function M.install(deps)
       return originalPlay(id, opts)
     end
     local settings = deps.currentSettings()
-    if not settings.enabled or settings.source == "native"
-        or settings.source == "gen3" then
+    if settings.source == "native" or settings.source == "gen3" then
       pending = nil
       if chip.id then resetBus() end
       if deps.toast then

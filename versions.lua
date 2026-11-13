@@ -134,7 +134,8 @@ function M.pick(mode, candidates, lastKey, rng)
     index = random(#usable)
     if lastKey then
       for attempt = 1, 4 do
-        local key = usable[index].version .. ":" .. usable[index].label
+        local key = usable[index].key
+          or (usable[index].version .. ":" .. usable[index].label)
         if key ~= lastKey then break end
         index = random(#usable)
       end

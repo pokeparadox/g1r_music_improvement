@@ -771,7 +771,7 @@ return function(mod)
   end
 
   local function candidatesFor(nativeId, s)
-    if not s.enabled or s.source == "native" then return {} end
+    if s.source == "native" then return {} end
     local hostGeneration = 1
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
@@ -1032,7 +1032,7 @@ return function(mod)
     total = 0
     local queuedVariant = {}
     state.skipped = false
-    if settings.enabled == false then
+    if settings.enabled == false and settings.source == "native" then
       state.pending = false
       return
     end
@@ -1054,13 +1054,15 @@ return function(mod)
           if not force then
             cachedDef = loadCached(cachePath(id, hash))
           end
-          if cachedDef then
-            indexGeneratedCachePath(cachePath(id, hash))
-            local improvedId = registerImproved(id, cachedDef)
-            stagedImprovedMap[id] = improvedId
-            extraDefs[improvedId] = cachedDef.extra
-          else
-            queue[#queue + 1] = id
+          if settings.enabled ~= false then
+            if cachedDef then
+              indexGeneratedCachePath(cachePath(id, hash))
+              local improvedId = registerImproved(id, cachedDef)
+              stagedImprovedMap[id] = improvedId
+              extraDefs[improvedId] = cachedDef.extra
+            else
+              queue[#queue + 1] = id
+            end
           end
         end
       end
@@ -1202,15 +1204,17 @@ return function(mod)
   end
 
   local function ensureVariant(nativeId, candidate, s)
+    local enabled = (s and s.enabled ~= false)
     local record = loadVariant(nativeId, candidate, s)
     if record then return record end
     return prepareVariant({
       kind = "variant",
       nativeId = nativeId,
-      improvedId = variantIdFor(nativeId, candidate.version),
+      improvedId = variantIdFor(nativeId, candidate.version, enabled),
       version = candidate.version,
       label = candidate.label,
       generation = candidate.generation,
+      enabled = enabled,
     }, s)
   end
 
@@ -1478,10 +1482,13 @@ return function(mod)
   if okMusic and type(Music.playOnce) == "function" then
     local corePlayOnce = Music.playOnce
     Music.playOnce = function(data, song)
+      local isShuffle = tostring(mod.options:get("source") or ""):match("^shuffle_") ~= nil
       local improved = type(song) == "string"
-        and (improvedMap[song] or chooseVariant(song)) or nil
-      if improved and mod.options:get("enabled") ~= false
-          and not state.skipped then
+        and (isShuffle and chooseVariant(song)
+          or (improvedMap[song] or chooseVariant(song))) or nil
+      local source = mod.options:get("source") or "native"
+      if improved and (mod.options:get("enabled") ~= false or source ~= "native")
+          and not (state.skipped and source == "native") then
         song = improved
       end
       return corePlayOnce(data, song)
@@ -1489,13 +1496,14 @@ return function(mod)
   end
 
   mod.hooks:wrap("music.select", function(next, chosen, ctx)
-    if mod.options:get("enabled") == false then
+    if mod.options:get("enabled") == false
+        and (mod.options:get("source") or "native") == "native" then
       return next(chosen, ctx)
     end
     if state.pending and not state.confirmed then
       return next(chosen, ctx)
     end
-    if state.skipped then
+    if state.skipped and (mod.options:get("source") or "native") == "native" then
       return next(chosen, ctx)
     end
     -- Core uses "direct" for calls with no context too (title, intro, menus),
@@ -1503,7 +1511,9 @@ return function(mod)
     if not ctx or ctx.reason == "jukebox" then
       return next(chosen, ctx)
     end
-    local improved = improvedMap[chosen] or chooseVariant(chosen)
+    local isShuffle = tostring(mod.options:get("source") or ""):match("^shuffle_") ~= nil
+    local improved = isShuffle and chooseVariant(chosen)
+      or (improvedMap[chosen] or chooseVariant(chosen))
     if improved then
       return next(improved, ctx)
     end
