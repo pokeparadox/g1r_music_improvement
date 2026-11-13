@@ -63,7 +63,7 @@ return function(mod)
   local function currentSettings()
     return {
       enabled = mod.options:get("enabled") ~= false,
-      source = mod.options:get("source") or "native",
+      source = mod.options:get("source") or "shuffle",
     }
   end
 
@@ -558,7 +558,7 @@ return function(mod)
   mod.options:define({
     { key = "enabled", type = "toggle", label = "ENABLE IMPROVEMENTS", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "source", type = "choice", label = "MUSIC VERSION", default = "native",
+    { key = "source", type = "choice", label = "MUSIC VERSION", default = "shuffle",
       choices = {
         { "NATIVE", "native" }, { "SHUFFLE", "shuffle" },
         { "GEN 1", "gen1" }, { "GEN 2", "gen2" },
@@ -607,6 +607,28 @@ return function(mod)
 
   local applyAll = true
 
+  local toast = { text = nil, until_ = 0 }
+  local function prettySongLabel(label)
+    label = tostring(label or "")
+    label = label:gsub("^Music_", ""):gsub("^MUS_", "")
+    label = label:gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+    return label
+  end
+  local function showToast(gen, label)
+    toast.text = string.format("%s %s", tostring(gen or ""), prettySongLabel(label))
+    toast.until_ = os.clock() + 2.5
+  end
+  local function genForSong(song)
+    local suffix = tostring(song or ""):match("_([%w]+)$")
+    if suffix and versions.BY_ID and versions.BY_ID[suffix] then
+      return "G" .. tostring(versions.BY_ID[suffix].generation)
+    end
+    local host = 1
+    if okGameVersion and GameVersion and GameVersion.generation then
+      host = GameVersion.generation(okGameVersion and GameVersion.get and GameVersion.get() or "red") or 1
+    end
+    return "G" .. tostring(host)
+  end
   local function improvedIdFor(name)
     return "Music_Improved" .. tostring(name):gsub("^Music_", "")
   end
@@ -746,6 +768,8 @@ return function(mod)
     end
     return filtered
   end
+
+  local loadCached
 
   local function loadVariant(nativeId, candidate, s)
     if not candidate then return nil end
@@ -900,7 +924,7 @@ return function(mod)
     end
   end
 
-  local function loadCached(path)
+  loadCached = function(path)
     local bytes = mod.cache:read(path)
     if type(bytes) ~= "string" then return nil end
     local chunk = load(bytes)
@@ -933,6 +957,13 @@ return function(mod)
   local function chooseVariant(nativeId)
     local s = currentSettings()
     if not s.enabled or s.source == "native" then return nil end
+    local candidates = candidatesFor(nativeId, s)
+    if #candidates == 0 then return nil end
+    for _, candidate in ipairs(candidates) do
+      if not variantByKey[variantKeyFor(candidate)] then
+        pcall(ensureVariant, nativeId, candidate, s)
+      end
+    end
     local list = variantMap[nativeId]
     if not list or #list == 0 then return nil end
     local picked = versions.pick(s.source, list, lastVariant[nativeId])
@@ -956,6 +987,7 @@ return function(mod)
     variantMap = {}
     variantByKey = {}
     lastVariant = {}
+    sourceCache = {}
     extraDefs = {}
     completed = 0
     total = 0
@@ -1559,6 +1591,7 @@ return function(mod)
       end
     end
     pcall(applyChannelMix)
+    if song then showToast(genForSong(song), song) end
   end)
   mod.events:on("music.stopped", function()
     currentImproved = false
@@ -1588,6 +1621,21 @@ return function(mod)
       state.confirmInstance = mod.ui.push(readyGame, "MusicImprovementConfirm")
     end
   end)
+  mod.hooks:wrap("render.hud", function(next, game, viewport)
+    if type(next) == "function" then pcall(next, game, viewport) end
+    if not toast.text or (toast.until_ or 0) < os.clock() then return end
+    if type(love) ~= "table" or type(love.graphics) ~= "table" then return end
+    local w = (viewport and viewport.width) or love.graphics.getWidth()
+    local h = (viewport and viewport.height) or love.graphics.getHeight()
+    local x, y = 8, 8
+    love.graphics.push("all")
+    love.graphics.setColor(0, 0, 0, 0.72)
+    love.graphics.rectangle("fill", x, y, 180, 20)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.print(toast.text, x + 6, y + 4)
+    love.graphics.pop()
+  end)
+
   mod.events:on("game.ready", function(payload)
     local game = payload and (payload.game or payload)
     if type(game) ~= "table" then return end
@@ -1608,7 +1656,9 @@ return function(mod)
           currentSettings = currentSettings,
           candidatesFor = candidatesFor,
           ensureVariant = ensureVariant,
+          loadVariant = loadVariant,
           extraAudio = extra,
+          toast = showToast,
         })
       end
     end
@@ -1625,6 +1675,7 @@ return function(mod)
         state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
       end
       local result = nextUpdate(self, dt)
+      if state.pending and state.skipped then prepareOne(self) end
       frameGuard(dt)
       -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
       -- Start harmony after it, in the same frame, instead of one frame late.

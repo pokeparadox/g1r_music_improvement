@@ -25,7 +25,7 @@ for _, entry in ipairs(M.VERSIONS) do M.BY_ID[entry.id] = entry end
 -- One group per recognisable tune.  Labels must match the dataset registries.
 M.EQUIVALENTS = {
   { gen1 = "Music_Pokecenter", gen2 = "Music_PokemonCenter", gen3 = "MUS_POKE_CENTER" },
-  { gen1 = "Music_TitleScreen", gen2 = "Music_TitleScreen", gen3 = "MUS_TITLE" },
+
   { gen1 = "Music_PalletTown", gen2 = "Music_PalletTown", gen3 = "MUS_PALLET" },
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN" },
   { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON" },
@@ -54,14 +54,14 @@ M.EQUIVALENTS = {
   { gen1 = "Music_SSAnne", gen2 = "Music_SSAqua", gen3 = "MUS_SS_ANNE" },
   { gen1 = "Music_PokemonTower", gen2 = "Music_TinTower", gen3 = "MUS_POKE_TOWER" },
   { gen1 = "Music_CinnabarMansion", gen3 = "MUS_POKE_MANSION" },
-  { gen1 = "Music_OaksLab", gen2 = "Music_ElmsLab", gen3 = "MUS_OAK_LAB" },
+
   { gen1 = "Music_MeetProfOak", gen2 = "Music_ProfOak", gen3 = "MUS_OAK" },
   { gen1 = "Music_DefeatedGymLeader", gen2 = "Music_GymLeaderVictory", gen3 = "MUS_VICTORY_GYM_LEADER" },
   { gen1 = "Music_DefeatedTrainer", gen2 = "Music_TrainerVictory", gen3 = "MUS_VICTORY_TRAINER" },
   { gen1 = "Music_DefeatedWildMon", gen2 = "Music_WildPokemonVictory", gen3 = "MUS_VICTORY_WILD" },
   { gen1 = "Music_PkmnHealed", gen2 = "Music_HealPokemon", gen3 = "MUS_HEAL" },
   { gen1 = "Music_JigglypuffSong", gen2 = "Music_PokemonLullaby", gen3 = "MUS_JIGGLYPUFF" },
-  { gen1 = "Music_IntroBattle", gen2 = "Music_GoldSilverOpening", gen3 = "MUS_INTRO_FIGHT" },
+
   { gen1 = "Music_SafariZone", gen2 = "Music_NationalPark", gen3 = "MUS_SAFARI_ZONE" },
   { gen1 = "Music_SilphCo", gen3 = "MUS_SILPH" },
   { gen2 = "Music_Evolution", gen3 = "MUS_EVOLUTION" },

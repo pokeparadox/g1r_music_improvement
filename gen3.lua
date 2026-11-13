@@ -20,8 +20,11 @@ function M.install(deps)
   local originalStopped = Audio.isBgmStopped
   local originalUpdate = Audio.update
   local originalStopAll = Audio.stopAll
-  local chip = { id = nil, nativeId = nil, record = nil, paused = false }
+  local chip = { id = nil, nativeId = nil, record = nil, paused = false,
+                 extraPending = nil }
+  local pending = nil   -- { nativeId, id, settings, candidate }
   local lastPick = {}
+  local chosen = {}     -- nativeId -> { source=..., candidate=... }
 
   local function nativeLabel(id)
     local ok, name = pcall(Song.nameOf, id, version)
@@ -29,37 +32,58 @@ function M.install(deps)
     return tostring(id)
   end
 
-  local function stopChip()
-    if not chip.id then return end
+  -- Unconditional bus teardown.  Do not early-return on chip.id: a transition
+  -- from native to native, chip to chip, or either direction must leave exactly
+  -- one bus running.
+  local function resetBus()
+    pcall(ChipAudio.holdMusic, false)
     pcall(ChipAudio.stopMusic)
     pcall(deps.extraAudio.stop)
-    -- Drop the logical song too: a later native playSong for the same id
-    -- would otherwise early-return on _currentSong and leave the bus silent.
-    Audio._currentSong = nil
-    Audio._bgmGen = nil
+    pcall(originalPlay, nil)
+    if Audio._outCh and Audio._outCh.clear then
+      pcall(Audio._outCh.clear, Audio._outCh)
+    end
+    Audio._bgmEpoch = (Audio._bgmEpoch or 0) + 1
     Audio._bgmPaused = false
+    Audio._fanfareActive = false
+    Audio._fanfareFrames = 0
+    Audio._fanfarePending = nil
+    Audio._fanfareRestore = nil
+    Audio._fanfareDeferred = nil
+    Audio._fadeOut, Audio._fadeIn = nil, nil
+    Audio._currentSong = nil
     chip.id, chip.nativeId, chip.record, chip.paused = nil, nil, nil, false
     chip.extraPending = nil
   end
 
-  local function pickVariant(nativeId, settings)
-    local candidates = deps.candidatesFor(nativeId, settings)
-    if #candidates == 0 then return nil end
-    local candidate = deps.versions.pick(settings.source, candidates, lastPick[nativeId])
-    if not candidate then return nil end
-    local record = deps.ensureVariant(nativeId, candidate, settings)
-    if record then
-      lastPick[nativeId] = candidate.version .. ":" .. candidate.label
+  local function candidateFor(nativeId, settings)
+    -- Shuffle must roll again for every fresh playSong, so do not reuse a
+    -- cached pick in that mode.
+    if settings.source ~= "shuffle" then
+      local cached = chosen[nativeId]
+      if cached and cached.source == settings.source then
+        return cached.candidate
+      end
     end
-    return record
+    local candidates = deps.candidatesFor(nativeId, settings)
+    if #candidates == 0 then
+      chosen[nativeId] = nil
+      return nil
+    end
+    local candidate = deps.versions.pick(settings.source, candidates,
+      lastPick[nativeId])
+    if candidate then
+      chosen[nativeId] = { source = settings.source, candidate = candidate }
+      lastPick[nativeId] = candidate.version .. ":" .. candidate.label
+    else
+      chosen[nativeId] = nil
+    end
+    return candidate
   end
 
   local function startChip(id, nativeId, record)
     local mapSong = Audio._mapSong
     local info = Audio.songInfo(id) or {}
-    -- Stop the GBA stream, then put the logical map song back: map/battle
-    -- restoration reads _mapSong and currentMapMusic().
-    originalPlay(nil)
     Audio._mapSong = mapSong or id
     Audio._currentSong = {
       id = id,
@@ -78,21 +102,30 @@ function M.install(deps)
     if not ok or not source then
       chip.id = nil
       Audio._currentSong = nil
+      Audio._bgmGen = nil
       return false
     end
-    pcall(source.setVolume, source, tonumber(Audio._bgmVolume) or 1)
+    pcall(source.setVolume, source, (tonumber(Audio._bgmVolume) or 1) * 0.3)
     pcall(deps.extraAudio.stop)
-    -- Harmony waits for the base stream's first buffer so both start on the
-    -- same frame, mirroring the Gen1/2 ChipAudio.update handshake.
     chip.extraPending = record.extra
+    if deps.toast then
+      local gen = record.generation and ("G" .. record.generation) or "G1"
+      pcall(deps.toast, gen, record.label)
+    end
     return true
+  end
+
+  local function playNative(id, opts)
+    resetBus()
+    return originalPlay(id, opts)
   end
 
   function Audio.playSong(id, opts)
     opts = opts or {}
     local resolved = Audio.resolveSong(id)
     if resolved == nil or resolved == 0 or resolved == 0xFFFF then
-      stopChip()
+      resetBus()
+      pending = nil
       return originalPlay(id, opts)
     end
     local info = Audio.songInfo(resolved)
@@ -102,24 +135,59 @@ function M.install(deps)
       or (fanfares and (fanfares[resolved]
         or fanfares[tostring(resolved)]))
     if isFanfare then
-      -- Keep chip state: the engine restores BGM through resumeBgm when the
-      -- jingle ends, and our wrapper resumes the held chip stream there.
       if chip.id then pcall(ChipAudio.holdMusic, true) end
       return originalPlay(id, opts)
     end
     local settings = deps.currentSettings()
-    if not settings.enabled or settings.source == "native" or settings.source == "gen3" then
-      stopChip()
+    if not settings.enabled or settings.source == "native"
+        or settings.source == "gen3" then
+      pending = nil
+      if chip.id then resetBus() end
+      if deps.toast then
+        pcall(deps.toast, "G3", nativeLabel(resolved))
+      end
       return originalPlay(id, opts)
     end
     local nativeId = nativeLabel(resolved)
-    if chip.id == resolved and not opts.restart then return true end
-    local record = pickVariant(nativeId, settings)
-    if not record then
-      stopChip()
+    -- Same variant already playing: do nothing.
+    if chip.id == resolved and chip.record and not opts.restart then
+      return true
+    end
+    -- A deferred preparation is already in flight for this song.
+    if pending and pending.id == resolved and not opts.restart then
+      return true
+    end
+    local candidate = candidateFor(nativeId, settings)
+    if not candidate then
+      pending = nil
+      if chip.id then resetBus() end
+      if deps.toast then
+        pcall(deps.toast, "G3", nativeLabel(resolved))
+      end
       return originalPlay(id, opts)
     end
-    return startChip(resolved, nativeId, record) and true or originalPlay(id, opts)
+    local record = deps.loadVariant(nativeId, candidate, settings)
+    if record then
+      resetBus()
+      pending = nil
+      local ok = startChip(resolved, nativeId, record)
+      if not ok then
+        return originalPlay(id, opts)
+      end
+      return true
+    end
+    -- Missing variant: play native now and prepare in the background.
+    pending = {
+      nativeId = nativeId,
+      id = resolved,
+      settings = settings,
+      candidate = candidate,
+    }
+    if chip.id then resetBus() end
+    if deps.toast then
+      pcall(deps.toast, "G3", nativeLabel(resolved))
+    end
+    return originalPlay(id, opts)
   end
 
   function Audio.pauseBgm()
@@ -148,7 +216,8 @@ function M.install(deps)
   end
 
   function Audio.stopAll()
-    stopChip()
+    resetBus()
+    pending = nil
     return originalStopAll()
   end
 
@@ -156,7 +225,7 @@ function M.install(deps)
     local result = originalUpdate(dt)
     if chip.id then
       pcall(ChipAudio.update)
-      local gain = tonumber(Audio._bgmVolume) or 1
+      local gain = (tonumber(Audio._bgmVolume) or 1) * 0.45
       local source = ChipAudio.currentSource()
       if source then
         pcall(source.setVolume, source, gain)
@@ -165,17 +234,37 @@ function M.install(deps)
           if okPlaying and playing then
             local extra = chip.extraPending
             chip.extraPending = nil
-            pcall(deps.extraAudio.start, extra, { audio = {} }, os.clock(), true)
+            pcall(deps.extraAudio.start, extra, { audio = {} },
+              os.clock(), true)
           end
         end
       end
       pcall(deps.extraAudio.setMusicVolume, gain)
       pcall(deps.extraAudio.setBaseVolume, gain)
+    elseif pending then
+      -- Deferred preparation: one per frame, then swap in the chip variant.
+      if not pending.busy then
+        pending.busy = true
+        local record = nil
+        local ok = pcall(function()
+          record = deps.ensureVariant(pending.nativeId, pending.candidate,
+            pending.settings)
+        end)
+        pending.busy = false
+        -- Do not interrupt a song that is already playing; the prepared
+        -- variant is now cached and will be used on the next playSong.
+        if ok and record then
+          pending = nil
+        else
+          pending = nil
+        end
+      end
     end
     return result
   end
 
   M.chip = chip
+  M.pending = function() return pending end
 end
 
 return M
