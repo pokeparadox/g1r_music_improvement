@@ -166,7 +166,42 @@ function M.install(deps)
       end
       return originalPlay(id, opts)
     end
-    local record = deps.loadVariant(nativeId, candidate, settings)
+    local enabledList = deps.enabledListFor
+      and deps.enabledListFor(settings.source, settings.enabled)
+      or { settings.enabled ~= false }
+    local records = {}
+    for _, enabled in ipairs(enabledList) do
+      local s2 = { enabled = enabled, source = settings.source }
+      local rec = deps.loadVariant(nativeId, candidate, s2)
+      if not rec then
+        rec = deps.ensureVariant(nativeId, candidate, s2)
+      end
+      if rec then records[#records + 1] = rec end
+    end
+    -- Filter by shuffle mode.
+    local eligible = {}
+    for _, rec in ipairs(records) do
+      local improved = tostring(rec.id):match("^Music_Improved") ~= nil
+      local stock = tostring(rec.id):match("^Music_Stock") ~= nil
+      if settings.source == "shuffle_improved" and improved then
+        eligible[#eligible + 1] = rec
+      elseif settings.source == "shuffle_stock" and stock then
+        eligible[#eligible + 1] = rec
+      else
+        eligible[#eligible + 1] = rec
+      end
+    end
+    local record = nil
+    if #eligible > 0 then
+      local picked = deps.versions.pick(settings.source, eligible,
+        lastPick[nativeId])
+      if picked then
+        record = picked
+        lastPick[nativeId] = picked.key
+      else
+        record = eligible[1]
+      end
+    end
     if record then
       resetBus()
       pending = nil
@@ -245,10 +280,14 @@ function M.install(deps)
       -- Deferred preparation: one per frame, then swap in the chip variant.
       if not pending.busy then
         pending.busy = true
-        local record = nil
         local ok = pcall(function()
-          record = deps.ensureVariant(pending.nativeId, pending.candidate,
-            pending.settings)
+          local enabledList = deps.enabledListFor
+            and deps.enabledListFor(pending.settings.source, pending.settings.enabled)
+            or { pending.settings.enabled ~= false }
+          for _, enabled in ipairs(enabledList) do
+            local s2 = { enabled = enabled, source = pending.settings.source }
+            deps.ensureVariant(pending.nativeId, pending.candidate, s2)
+          end
         end)
         pending.busy = false
         -- Do not interrupt a song that is already playing; the prepared

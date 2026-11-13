@@ -63,7 +63,11 @@ return function(mod)
   local function currentSettings()
     return {
       enabled = mod.options:get("enabled") ~= false,
-      source = mod.options:get("source") or "shuffle",
+      source = (function()
+        local raw = mod.options:get("source") or "shuffle_all"
+        if raw == "shuffle" then raw = "shuffle_all" end
+        return raw
+      end)(),
     }
   end
 
@@ -558,9 +562,12 @@ return function(mod)
   mod.options:define({
     { key = "enabled", type = "toggle", label = "ENABLE IMPROVEMENTS", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "source", type = "choice", label = "MUSIC VERSION", default = "shuffle",
+    { key = "source", type = "choice", label = "MUSIC VERSION", default = "shuffle_all",
       choices = {
-        { "NATIVE", "native" }, { "SHUFFLE", "shuffle" },
+        { "NATIVE", "native" },
+        { "SHUF ALL", "shuffle_all" },
+        { "SHUF IMP", "shuffle_improved" },
+        { "SHUF STK", "shuffle_stock" },
         { "GEN 1", "gen1" }, { "GEN 2", "gen2" },
       } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
@@ -722,17 +729,27 @@ return function(mod)
     return ok and def ~= nil
   end
 
-  local function variantIdFor(nativeId, version)
+  local function variantIdFor(nativeId, version, enabled)
     local suffix = tostring(nativeId):gsub("^Music_", ""):gsub("^MUS_", "")
-    return "Music_Improved" .. suffix .. "_" .. tostring(version)
+    local base = enabled and "Music_Improved" or "Music_Stock"
+    return base .. suffix .. "_" .. tostring(version)
   end
 
-  local function variantKeyFor(candidate)
+  local function enabledListFor(mode, userEnabled)
+    if mode == "shuffle_stock" then return { false } end
+    if mode == "shuffle_improved" then return { true } end
+    if mode == "shuffle_all" then return { true, false } end
+    return { userEnabled ~= false }
+  end
+
+  local function variantKeyFor(candidate, enabled)
     return tostring(candidate.version) .. ":" .. tostring(candidate.label)
+      .. ":" .. (enabled and "I" or "S")
   end
 
-  local function rememberVariant(nativeId, candidate, def, improvedId)
-    local key = variantKeyFor(candidate)
+  local function rememberVariant(nativeId, candidate, def, improvedId, enabled)
+    if enabled == nil then enabled = improvedId:match("^Music_Improved") ~= nil end
+    local key = variantKeyFor(candidate, enabled)
     local record = {
       key = key,
       id = improvedId,
@@ -741,6 +758,7 @@ return function(mod)
       version = candidate.version,
       label = candidate.label,
       generation = candidate.generation,
+      improved = enabled,
     }
     variantByKey[key] = record
     local list = variantMap[nativeId]
@@ -773,15 +791,16 @@ return function(mod)
 
   local function loadVariant(nativeId, candidate, s)
     if not candidate then return nil end
-    local key = variantKeyFor(candidate)
+    local enabled = (s and s.enabled ~= false)
+    local key = variantKeyFor(candidate, enabled)
     local existing = variantByKey[key]
     if existing and existing.def then return existing end
-    local improvedId = variantIdFor(nativeId, candidate.version)
+    local improvedId = variantIdFor(nativeId, candidate.version, enabled)
     local cached = loadCached(cachePath(improvedId, settingsHash(s)))
     if cached then
       registerImprovedId(improvedId, cached)
       extraDefs[improvedId] = cached.extra
-      return rememberVariant(nativeId, candidate, cached, improvedId)
+      return rememberVariant(nativeId, candidate, cached, improvedId, enabled)
     end
     return nil
   end
@@ -956,17 +975,37 @@ return function(mod)
 
   local function chooseVariant(nativeId)
     local s = currentSettings()
-    if not s.enabled or s.source == "native" then return nil end
+    if s.source == "native" then return nil end
     local candidates = candidatesFor(nativeId, s)
     if #candidates == 0 then return nil end
+    local enabledList = enabledListFor(s.source, s.enabled)
     for _, candidate in ipairs(candidates) do
-      if not variantByKey[variantKeyFor(candidate)] then
-        pcall(ensureVariant, nativeId, candidate, s)
+      for _, enabled in ipairs(enabledList) do
+        local key = variantKeyFor(candidate, enabled)
+        if not variantByKey[key] then
+          pcall(ensureVariant, nativeId, candidate,
+            { enabled = enabled, source = s.source })
+        end
       end
     end
     local list = variantMap[nativeId]
     if not list or #list == 0 then return nil end
-    local picked = versions.pick(s.source, list, lastVariant[nativeId])
+    local eligible = {}
+    for _, rec in ipairs(list) do
+      local improved = tostring(rec.id):match("^Music_Improved") ~= nil
+      local stock = tostring(rec.id):match("^Music_Stock") ~= nil
+      if s.source == "shuffle_improved" and improved then
+        eligible[#eligible + 1] = rec
+      elseif s.source == "shuffle_stock" and stock then
+        eligible[#eligible + 1] = rec
+      elseif s.source == "shuffle_all" then
+        eligible[#eligible + 1] = rec
+      else
+        eligible[#eligible + 1] = rec
+      end
+    end
+    if #eligible == 0 then return nil end
+    local picked = versions.pick(s.source, eligible, lastVariant[nativeId])
     if not picked then return nil end
     lastVariant[nativeId] = picked.key
     return picked.id
@@ -1027,25 +1066,30 @@ return function(mod)
       end
     end
     if settings.source ~= "native" then
+      local enabledList = enabledListFor(settings.source, settings.enabled)
       for _, id in ipairs(ids) do
         if not tostring(id):match("^Music_Improved") and originalDefs[id] then
           for _, candidate in ipairs(candidatesFor(id, settings)) do
-            local record = loadVariant(id, candidate, settings)
-            if record then
-              indexGeneratedCachePath(cachePath(record.id, hash))
-              extraDefs[record.id] = record.extra
-            else
-              local key = tostring(id) .. "|" .. variantKeyFor(candidate)
-              if not queuedVariant[key] then
-                queuedVariant[key] = true
-                queue[#queue + 1] = {
-                  kind = "variant",
-                  nativeId = id,
-                  improvedId = variantIdFor(id, candidate.version),
-                  version = candidate.version,
-                  label = candidate.label,
-                  generation = candidate.generation,
-                }
+            for _, enabled in ipairs(enabledList) do
+              local s2 = { enabled = enabled, source = settings.source }
+              local record = loadVariant(id, candidate, s2)
+              if record then
+                indexGeneratedCachePath(cachePath(record.id, hash))
+                extraDefs[record.id] = record.extra
+              else
+                local key = tostring(id) .. "|" .. variantKeyFor(candidate, enabled)
+                if not queuedVariant[key] then
+                  queuedVariant[key] = true
+                  queue[#queue + 1] = {
+                    kind = "variant",
+                    nativeId = id,
+                    improvedId = variantIdFor(id, candidate.version, enabled),
+                    version = candidate.version,
+                    label = candidate.label,
+                    generation = candidate.generation,
+                    enabled = enabled,
+                  }
+                end
               end
             end
           end
@@ -1133,9 +1177,12 @@ return function(mod)
 
   local function prepareVariant(entry, s)
     s = s or settings
+    local enabled = entry.enabled
+    if enabled == nil then enabled = s.enabled ~= false end
+    local ss = { enabled = enabled, source = s.source }
     local source = sourceFor(entry.version)
     local def = source and source.view.content.music:get(entry.label)
-    local translated = registerTranslation(def, s, entry.label,
+    local translated = registerTranslation(def, ss, entry.label,
       source and source.data, entry.improvedId)
     if not translated then return nil end
     local data = musicData()
@@ -1149,7 +1196,7 @@ return function(mod)
     end
     extraDefs[entry.improvedId] = translated.extra
     registerImprovedId(entry.improvedId, translated)
-    local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId)
+    local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId, enabled)
     writeCached(entry.improvedId, translated)
     return record
   end
@@ -1396,12 +1443,14 @@ return function(mod)
         label = "MUSIC VERSION",
         value = function()
           local source = mod.options:get("source") or "native"
-          return ({ native = "NATIVE", shuffle = "SHUFFLE",
+          return ({ native = "NATIVE", shuffle_all = "SHUF ALL",
+            shuffle_improved = "SHUF IMP", shuffle_stock = "SHUF STK",
             gen1 = "GEN 1", gen2 = "GEN 2" })[source] or "NATIVE"
         end,
         activate = function(g)
-          local modes = { "native", "shuffle", "gen1", "gen2" }
-          local cur = mod.options:get("source") or "native"
+          local modes = { "native", "shuffle_all", "shuffle_improved",
+            "shuffle_stock", "gen1", "gen2" }
+          local cur = mod.options:get("source") or "shuffle_all"
           local index = 1
           for i, mode in ipairs(modes) do if mode == cur then index = i break end end
           setModOption(g, "source", modes[index % #modes + 1])
@@ -1657,6 +1706,7 @@ return function(mod)
           candidatesFor = candidatesFor,
           ensureVariant = ensureVariant,
           loadVariant = loadVariant,
+          enabledListFor = enabledListFor,
           extraAudio = extra,
           toast = showToast,
         })
