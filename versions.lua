@@ -28,6 +28,11 @@ M.EQUIVALENTS = {
 
   { gen1 = "Music_PalletTown", gen2 = "Music_PalletTown", gen3 = "MUS_PALLET" },
   { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN" },
+  { gen1 = "Music_TitleScreen", gen3 = "MUS_TITLE", hosts = { "firered", "leafgreen" },
+      hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
+  { gen1 = "Music_IntroBattle", gen3 = "MUS_INTRO_FIGHT", hosts = { "firered", "leafgreen" },
+      hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
+  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER" },
   { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON" },
   { gen1 = "Music_Vermilion", gen2 = "Music_VermilionCity", gen3 = "MUS_VERMILLION" },
   { gen1 = "Music_Lavender", gen2 = "Music_LavenderTown", gen3 = "MUS_LAVENDER" },
@@ -70,10 +75,9 @@ M.EQUIVALENTS = {
 M.byLabel = {}
 for _, group in ipairs(M.EQUIVALENTS) do
   for generation, label in pairs(group) do
-    if generation ~= "gen1" and generation ~= "gen2" and generation ~= "gen3" then
-      error("versions: bad generation key " .. tostring(generation))
+    if generation == "gen1" or generation == "gen2" or generation == "gen3" then
+      M.byLabel[label] = group
     end
-    M.byLabel[label] = group
   end
 end
 
@@ -91,12 +95,28 @@ function M.candidates(label, hostGeneration, hostVersion, available)
   local group = M.byLabel[label]
   if not group then return {} end
   local out = {}
+  local allowedSources = nil
+  if group.hostSources and group.hostSources[hostVersion] then
+    allowedSources = {}
+    for _, v in ipairs(group.hostSources[hostVersion]) do allowedSources[v] = true end
+  elseif group.sources then
+    allowedSources = {}
+    for _, v in ipairs(group.sources) do allowedSources[v] = true end
+  end
+  -- hosts restriction: group only applies on certain host versions
+  if group.hosts then
+    local ok = false
+    for _, h in ipairs(group.hosts) do if h == hostVersion then ok = true break end end
+    if not ok then return out end
+  end
   for _, version in ipairs(M.VERSIONS) do
     local generation = "gen" .. tostring(version.generation)
     local candidateLabel = group[generation]
     if candidateLabel and version.id ~= hostVersion
         and (generation == "gen1" or generation == "gen2") then
-      if not available or available(version.id, candidateLabel) then
+      if allowedSources and not allowedSources[version.id] then
+        -- skip
+      elseif not available or available(version.id, candidateLabel) then
         out[#out + 1] = {
           version = version.id,
           generation = version.generation,

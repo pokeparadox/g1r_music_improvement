@@ -162,7 +162,7 @@ function M.install(deps)
       pending = nil
       if chip.id then resetBus() end
       if deps.toast then
-        pcall(deps.toast, "G3", nativeLabel(resolved))
+        pcall(deps.toast, "G3", nativeLabel(resolved) .. " (no alt)")
       end
       return originalPlay(id, opts)
     end
@@ -174,7 +174,13 @@ function M.install(deps)
       local s2 = { enabled = enabled, source = settings.source }
       local rec = deps.loadVariant(nativeId, candidate, s2)
       if not rec then
-        rec = deps.ensureVariant(nativeId, candidate, s2)
+        local ok, err = pcall(function()
+          rec = deps.ensureVariant(nativeId, candidate, s2)
+        end)
+        if not ok then
+          if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (exc: " .. tostring(err):sub(1,40) .. ")") end
+          rec = nil
+        end
       end
       if rec then records[#records + 1] = rec end
     end
@@ -207,10 +213,12 @@ function M.install(deps)
       pending = nil
       local ok = startChip(resolved, nativeId, record)
       if not ok then
+        if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (start fail)") end
         return originalPlay(id, opts)
       end
       return true
     end
+    if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (prep fail)") end
     -- Missing variant: play native now and prepare in the background.
     pending = {
       nativeId = nativeId,
