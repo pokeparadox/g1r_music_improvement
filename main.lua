@@ -1794,11 +1794,6 @@ return function(mod)
         end)
         local seenContent = {}
         for _, record in ipairs(records) do
-          -- Same-generation source variants duplicate the native entry's
-          -- generation; keep only cross-generation variants in the test menu.
-          if record.generation == hostGen then
-            -- skip
-          else
           local contentKey = record.cachePath or record.id
           if contentKey and seenContent[contentKey] then
             -- Skip an identical translation already represented by another version.
@@ -1811,7 +1806,6 @@ return function(mod)
               version = record.version,
               id = record.id,
             }
-          end
           end
         end
         add({
@@ -1842,7 +1836,8 @@ return function(mod)
   musicTestItems = function(entries)
     local items = {}
     for _, entry in ipairs(entries) do
-      local variant = musicMenu.select(entry, "", musicTestImproved)
+      local initialKey = entry.variants[1] and musicMenu.versionKey(entry.variants[1]) or ""
+      local variant = musicMenu.select(entry, initialKey, musicTestImproved)
         or entry.variants[1]
       items[#items + 1] = {
         label = entry.name,

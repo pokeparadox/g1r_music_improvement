@@ -6,7 +6,7 @@ local M = {}
 
 -- Version identity for cycling: native playback is its own slot.
 function M.versionKey(variant)
-  if not variant or variant.native then return "" end
+  if not variant then return "" end
   return tostring(variant.generation or "")
 end
 
@@ -40,14 +40,20 @@ end
 -- Falls back to the other kind when that combination is not available.
 function M.select(entry, versionKey, improved)
   local fallback
+  local nativeVariant
   for _, variant in ipairs(entry and entry.variants or {}) do
     if M.versionKey(variant) == versionKey then
-      if variant.native then return variant end
-      if variant.improved == improved then return variant end
-      fallback = fallback or variant
+      if variant.native then
+        nativeVariant = nativeVariant or variant
+      elseif variant.improved == improved then
+        return variant
+      else
+        fallback = fallback or variant
+      end
     end
   end
-  return fallback
+  if fallback then return fallback end
+  return nativeVariant
 end
 
 -- Move `dir` slots from the current version and return that variant.
