@@ -1794,6 +1794,11 @@ return function(mod)
         end)
         local seenContent = {}
         for _, record in ipairs(records) do
+          -- Same-generation source variants duplicate the native entry's
+          -- generation; keep only cross-generation variants in the test menu.
+          if record.generation == hostGen then
+            -- skip
+          else
           local contentKey = record.cachePath or record.id
           if contentKey and seenContent[contentKey] then
             -- Skip an identical translation already represented by another version.
@@ -1806,6 +1811,7 @@ return function(mod)
               version = record.version,
               id = record.id,
             }
+          end
           end
         end
         add({
