@@ -111,7 +111,8 @@ function M.install(deps)
     chip.extraPending = record.extra
     if deps.toast then
       local gen = record.generation and ("G" .. record.generation) or "G1"
-      pcall(deps.toast, gen, record.label)
+      local tag = record.improved and " IMP" or " STK"
+      pcall(deps.toast, gen, record.label .. tag)
     end
     return true
   end
@@ -184,18 +185,7 @@ function M.install(deps)
       if rec then records[#records + 1] = rec end
     end
     -- Filter by shuffle mode.
-    local eligible = {}
-    for _, rec in ipairs(records) do
-      local improved = tostring(rec.id or ""):match("^Music_Improved") ~= nil
-      local stock = tostring(rec.id or ""):match("^Music_Stock") ~= nil
-      if settings.source == "shuffle_improved" and improved then
-        eligible[#eligible + 1] = rec
-      elseif settings.source == "shuffle_stock" and stock then
-        eligible[#eligible + 1] = rec
-      else
-        eligible[#eligible + 1] = rec
-      end
-    end
+    local eligible = deps.versions.eligible(settings.source, records)
     -- shuffle_all also rotates the native GBA version.
     if settings.source == "shuffle_all" then
       eligible[#eligible + 1] = { native = true, key = "native:" .. tostring(nativeId) }
@@ -310,11 +300,7 @@ function M.install(deps)
         pending.busy = false
         -- Do not interrupt a song that is already playing; the prepared
         -- variant is now cached and will be used on the next playSong.
-        if ok and record then
-          pending = nil
-        else
-          pending = nil
-        end
+        pending = nil
       end
     end
     return result

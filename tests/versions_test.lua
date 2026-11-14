@@ -53,4 +53,18 @@ local a = V.pick("shuffle", list, nil, rng)
 local b = V.pick("shuffle", list, a.version .. ":" .. a.label, rng)
 assert(b and (a.version .. ":" .. a.label) ~= (b.version .. ":" .. b.label))
 
+-- Shuffle-mode eligibility filters variant kinds.
+local recs = {
+  { id = "Music_ImprovedCities1_red" },
+  { id = "Music_StockCities1_red" },
+  { id = nil },
+}
+assert(#V.eligible("shuffle_improved", recs) == 1)
+assert(V.eligible("shuffle_improved", recs)[1].id == "Music_ImprovedCities1_red")
+assert(#V.eligible("shuffle_stock", recs) == 1)
+assert(V.eligible("shuffle_stock", recs)[1].id == "Music_StockCities1_red")
+assert(#V.eligible("shuffle_all", recs) == 3)
+assert(#V.eligible("gen1", recs) == 3)
+assert(#V.eligible("shuffle_improved", nil) == 0)
+
 print("versions ok")

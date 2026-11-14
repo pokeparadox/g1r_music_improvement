@@ -130,6 +130,23 @@ function M.candidates(label, hostGeneration, hostVersion, available)
   return out
 end
 
+-- Keep only records matching the shuffle mode's variant kind.  Other modes
+-- (shuffle_all, gen1, gen2, ...) pass everything through.
+function M.eligible(mode, records)
+  local out = {}
+  for _, rec in ipairs(records or {}) do
+    local id = tostring(rec.id or "")
+    local keep = true
+    if mode == "shuffle_improved" then
+      keep = id:match("^Music_Improved") ~= nil
+    elseif mode == "shuffle_stock" then
+      keep = id:match("^Music_Stock") ~= nil
+    end
+    if keep then out[#out + 1] = rec end
+  end
+  return out
+end
+
 function M.generationForMode(mode)
   if mode == "gen1" then return 1 end
   if mode == "gen2" then return 2 end

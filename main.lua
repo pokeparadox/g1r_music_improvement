@@ -982,54 +982,14 @@ return function(mod)
     pcall(Music.play, musicData(), song, loop, { reason = currentReason or "map" })
   end
 
-  local queuedVariantKeys = {}
-  local function queueVariant(nativeId, candidate, enabled)
-    local key = tostring(nativeId) .. "|" .. variantKeyFor(candidate, enabled)
-    if queuedVariantKeys[key] then return end
-    queuedVariantKeys[key] = true
-    queue[#queue + 1] = {
-      kind = "variant",
-      nativeId = nativeId,
-      improvedId = variantIdFor(nativeId, candidate.version, enabled),
-      version = candidate.version,
-      label = candidate.label,
-      generation = candidate.generation,
-      enabled = enabled,
-    }
-    total = #queue
-    state.pending = true
-  end
-
   local function chooseVariant(nativeId)
     local s = currentSettings()
     if s.source == "native" then return nil end
     local candidates = candidatesFor(nativeId, s)
     if #candidates == 0 then return nil end
-    local enabledList = enabledListFor(s.source, s.enabled)
-    for _, candidate in ipairs(candidates) do
-      for _, enabled in ipairs(enabledList) do
-        local key = variantKeyFor(candidate, enabled)
-        if not variantByKey[key] then
-          queueVariant(nativeId, candidate, enabled)
-        end
-      end
-    end
     local list = variantMap[nativeId]
     if not list or #list == 0 then return nil end
-    local eligible = {}
-    for _, rec in ipairs(list) do
-      local improved = tostring(rec.id):match("^Music_Improved") ~= nil
-      local stock = tostring(rec.id):match("^Music_Stock") ~= nil
-      if s.source == "shuffle_improved" and improved then
-        eligible[#eligible + 1] = rec
-      elseif s.source == "shuffle_stock" and stock then
-        eligible[#eligible + 1] = rec
-      elseif s.source == "shuffle_all" then
-        eligible[#eligible + 1] = rec
-      else
-        eligible[#eligible + 1] = rec
-      end
-    end
+    local eligible = versions.eligible(s.source, list)
     if #eligible == 0 then return nil end
     local picked = versions.pick(s.source, eligible, lastVariant[nativeId])
     if not picked then return nil end
@@ -1055,7 +1015,6 @@ return function(mod)
     sourceCache = {}
     extraDefs = {}
     candidateCache = {}
-    queuedVariantKeys = {}
     completed = 0
     total = 0
     local queuedVariant = {}
@@ -1071,6 +1030,27 @@ return function(mod)
       for id in pairs(data.audio.songs) do ids[#ids + 1] = id end
     end
     table.sort(ids)
+    local hostGeneration = 1
+    if okGameVersion and GameVersion and GameVersion.generation then
+      hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
+    end
+    local variantIds = ids
+    if hostGeneration == 3 then
+      -- Gen3 data has no audio.songs; enumerate the host's song table instead.
+      variantIds = {}
+      local okSong, Song = pcall(require, "src.core.game3.song_ids")
+      if okSong and Song and Song.forVersion then
+        local okSongs, songs = pcall(Song.forVersion, activeCacheGame)
+        if okSongs and type(songs) == "table" then
+          for label in pairs(songs) do
+            if tostring(label):match("^MUS_") and versions.byLabel[label] then
+              variantIds[#variantIds + 1] = label
+            end
+          end
+        end
+      end
+      table.sort(variantIds)
+    end
     local hash = settingsHash(settings)
     for _, id in ipairs(ids) do
       if not tostring(id):match("^Music_Improved") then
@@ -1097,8 +1077,8 @@ return function(mod)
     end
     if settings.source ~= "native" then
       local enabledList = enabledListFor(settings.source, settings.enabled)
-      for _, id in ipairs(ids) do
-        if not tostring(id):match("^Music_Improved") and originalDefs[id] then
+      for _, id in ipairs(variantIds) do
+        if not tostring(id):match("^Music_Improved") and (hostGeneration == 3 or originalDefs[id]) then
           for _, candidate in ipairs(candidatesFor(id, settings)) do
             for _, enabled in ipairs(enabledList) do
               local s2 = { enabled = enabled, source = settings.source }
@@ -1636,8 +1616,6 @@ return function(mod)
 
   local function applyChannelMix()
     if not okChipAudio or type(ChipAudio) ~= "table" then return end
-    local enhancementActive = mod.options:get("enabled") ~= false
-      and not state.skipped and (not state.pending or state.confirmed)
     pcall(ChipAudio.setChannelVolumes, { 1, 1, 1, 1 })
   end
   mod.events:on("music.started", function(payload)
@@ -1652,7 +1630,7 @@ return function(mod)
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
       local enhancementActive = mod.options:get("enabled") ~= false
-        and not state.skipped and not state.pending and not suppressExtra
+        and not state.skipped and not suppressExtra
       if extra and enhancementActive then
         pendingLooping = currentReason ~= "once"
         guardIgnoreUntil = g1rClock() + 2
