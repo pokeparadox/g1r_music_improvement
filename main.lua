@@ -1613,6 +1613,7 @@ return function(mod)
     return ui.openList(game, {
       title = "MUSIC TEST",
       items = items,
+      stayOpen = true,
       onChoose = function(item)
         if not item.value then return end
         local A = audio3()

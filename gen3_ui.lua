@@ -25,6 +25,7 @@ function M.openList(game, opts)
     scroll = 0,
     onChoose = opts.onChoose,
     onCancel = opts.onCancel,
+    stayOpen = opts.stayOpen,
   }
   local F = font()
 
@@ -81,7 +82,7 @@ function M.openList(game, opts)
     elseif input:wasPressed("a") then
       local item = menu.items[menu.index]
       if item then
-        close(false)
+        if not menu.stayOpen then close(false) end
         if menu.onChoose then pcall(menu.onChoose, item) end
       end
     elseif input:wasPressed("b") then
