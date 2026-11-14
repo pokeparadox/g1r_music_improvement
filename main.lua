@@ -674,8 +674,10 @@ return function(mod)
     return (mod.manifest.version or "0") .. "_" .. tostring(s.enabled)
   end
 
-  -- Caches must never cross game versions: Red/Blue/Yellow and every Gen2
-  -- game reuse song IDs but can have different source bytecode.
+  -- Base songs are cached per host version: Red/Blue/Yellow and every Gen2
+  -- game reuse song IDs but can have different source bytecode.  Variants are
+  -- keyed by source version instead: their translation does not depend on the
+  -- host, so every host shares the same file.
   local function cacheGameId(game)
     local version = game and game.save and game.save.version
     if type(version) ~= "string" or version == "" then
@@ -687,9 +689,17 @@ return function(mod)
 
   local activeCacheGame = cacheGameId(nil)
 
+  local function safeCacheId(id)
+    return tostring(id):gsub("[^%w_]", "_")
+  end
+
   local function cachePath(id, hash)
-    local safeId = tostring(id):gsub("[^%w_]", "_")
-    return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeId .. ".lua"
+    return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeCacheId(id) .. ".lua"
+  end
+
+  local function variantCachePath(id, version, hash)
+    local safeVersion = tostring(version or "unknown"):gsub("[^%w_]", "_")
+    return "songs/v_" .. safeVersion .. "_" .. hash .. "_" .. safeCacheId(id) .. ".lua"
   end
 
   -- A dataset view is a detached, data-only copy.  Build the same synthetic
@@ -815,7 +825,8 @@ return function(mod)
     local existing = variantByKey[key]
     if existing and existing.def then return existing end
     local improvedId = variantIdFor(nativeId, candidate.version, enabled)
-    local cached = loadCached(cachePath(improvedId, settingsHash(s)))
+    local cached = loadCached(variantCachePath(improvedId, candidate.version,
+      settingsHash(s)))
     if cached then
       registerImprovedId(improvedId, cached)
       extraDefs[improvedId] = cached.extra
@@ -824,22 +835,20 @@ return function(mod)
     return nil
   end
 
-  local function cacheIndexFor(gameId)
-    return "songs/" .. gameId .. "_index.txt"
-  end
-
-  local cacheIndexPath = cacheIndexFor(activeCacheGame)
+  -- One index for every generated file: base songs are host-scoped, variants
+  -- are shared across hosts.  Per-game indexes from older builds are merged
+  -- and removed by migrateCacheIndex.
+  local cacheIndexPath = "songs/index.txt"
   local cacheIndexPaths = {}
   local cacheIndexSet = {}
   local cacheIndexReady = false
 
   local function isGeneratedCachePath(path)
-    local prefix = "songs/" .. activeCacheGame .. "_"
-    if type(path) ~= "string" or path:sub(1, #prefix) ~= prefix
+    if type(path) ~= "string" or path:sub(1, 6) ~= "songs/"
         or path == cacheIndexPath then
       return false
     end
-    local filename = path:sub(#prefix + 1)
+    local filename = path:sub(7)
     return filename ~= "" and not filename:find("[/\\]")
       and not filename:find("[%z\1-\31]")
       and filename:match("%.lua$") ~= nil
@@ -932,35 +941,95 @@ return function(mod)
     return true
   end
 
-  local function deleteCacheFile(path)
+  local function deleteCacheFile(path, quiet)
     local exists = cacheFileExists(path)
     if exists == nil then return false end
     if not exists then return true end
     if type(mod.cache.delete) ~= "function" then
-      mod.log:error("music_improvement: cache delete API unavailable for %s", path)
+      if not quiet then
+        mod.log:error("music_improvement: cache delete API unavailable for %s", path)
+      end
       return false
     end
     local ok, result = pcall(mod.cache.delete, mod.cache, path)
     if not ok or result == false then
-      mod.log:error("music_improvement: failed to delete cached file %s%s",
-        path, ok and "" or ": " .. tostring(result))
+      if not quiet then
+        mod.log:error("music_improvement: failed to delete cached file %s%s",
+          path, ok and "" or ": " .. tostring(result))
+      end
       return false
     end
     exists = cacheFileExists(path)
     if exists ~= false then
-      mod.log:error("music_improvement: cached file still exists after deletion: %s", path)
+      if not quiet then
+        mod.log:error("music_improvement: cached file still exists after deletion: %s", path)
+      end
       return false
     end
     return true
   end
 
-  do
+  local function migrateCacheIndex()
     local paths, seen = readCacheIndex()
-    if paths then
-      cacheIndexPaths, cacheIndexSet = paths, seen
-      cacheIndexReady = true
+    if not paths then return end
+    local changed = false
+
+    local function addPath(path)
+      if isGeneratedCachePath(path) and not seen[path] then
+        paths[#paths + 1] = path
+        seen[path] = true
+        changed = true
+      end
     end
+
+    -- Older builds kept one index per host game; merge them.
+    for _, entry in ipairs((versions and versions.VERSIONS) or {}) do
+      local legacy = "songs/" .. tostring(entry.id) .. "_index.txt"
+      if cacheFileExists(legacy) then
+        local ok, contents = pcall(mod.cache.read, mod.cache, legacy)
+        if ok and type(contents) == "string" then
+          for path in contents:gmatch("[^\r\n]+") do addPath(path) end
+        end
+        deleteCacheFile(legacy, true)
+      end
+    end
+
+    -- Drop files from other manifest versions and host-prefixed variants
+    -- (variants now live in the shared v_<source>_ namespace).  If the
+    -- filesystem cannot delete (headless test overlays), keep the entries and
+    -- stop trying; playback ignores files whose hash does not match.
+    local marker = "_" .. tostring(mod.manifest.version or "0") .. "_"
+    local kept = {}
+    local pruneOk = true
+    for _, path in ipairs(paths) do
+      local keep = path:find(marker, 1, true) ~= nil
+      local host = path:match("^songs/(%a+)_")
+      if keep and host and host ~= "v"
+          and (path:find("_Music_Improved", 1, true)
+            or path:find("_Music_Stock", 1, true)) then
+        keep = false
+      end
+      if keep then
+        kept[#kept + 1] = path
+      elseif pruneOk then
+        if deleteCacheFile(path, true) then
+          changed = true
+        else
+          pruneOk = false
+          kept[#kept + 1] = path
+        end
+      else
+        kept[#kept + 1] = path
+      end
+    end
+
+    cacheIndexPaths, cacheIndexSet = kept, {}
+    for _, path in ipairs(kept) do cacheIndexSet[path] = true end
+    cacheIndexReady = true
+    if changed then writeCacheIndex(kept) end
   end
+
+  migrateCacheIndex()
 
   loadCached = function(path)
     local bytes = mod.cache:read(path)
@@ -1011,9 +1080,6 @@ return function(mod)
     local gameId = cacheGameId(game)
     if activeCacheGame ~= gameId then
       activeCacheGame = gameId
-      cacheIndexPath = cacheIndexFor(gameId)
-      cacheIndexPaths, cacheIndexSet = {}, {}
-      cacheIndexReady = false
     end
     queue = {}
     originalDefs = {}
@@ -1095,7 +1161,8 @@ return function(mod)
               local s2 = { enabled = enabled, source = settings.source }
               local record = loadVariant(id, candidate, s2)
               if record then
-                indexGeneratedCachePath(cachePath(record.id, hash))
+                indexGeneratedCachePath(variantCachePath(record.id,
+                  candidate.version, hash))
                 extraDefs[record.id] = record.extra
               else
                 local key = tostring(id) .. "|" .. variantKeyFor(candidate, enabled)
@@ -1144,17 +1211,28 @@ return function(mod)
   end
 
   local function clearSongCache()
-    local indexedPaths, indexedSet = readCacheIndex()
+    local indexedPaths = readCacheIndex()
     if not indexedPaths then return false end
 
+    -- Rebuild this host's base songs and all shared variants; keep other
+    -- hosts' base caches.
+    local hostPrefix = "songs/" .. activeCacheGame .. "_"
+    local kept = {}
     for _, path in ipairs(indexedPaths) do
-      if not deleteCacheFile(path) then return false end
+      local sharedVariant = path:find("_Music_Improved", 1, true)
+        or path:find("_Music_Stock", 1, true)
+      if sharedVariant or path:sub(1, #hostPrefix) == hostPrefix then
+        if not deleteCacheFile(path) then return false end
+      else
+        kept[#kept + 1] = path
+      end
     end
 
-    if not deleteCacheFile(cacheIndexPath) then return false end
-    cacheIndexPaths, cacheIndexSet = {}, {}
+    cacheIndexPaths, cacheIndexSet = kept, {}
+    for _, path in ipairs(kept) do cacheIndexSet[path] = true end
     cacheIndexReady = true
-    mod.log:info("music_improvement: cleared indexed generated song cache")
+    if not writeCacheIndex(kept) then return false end
+    mod.log:info("music_improvement: cleared generated song cache")
     return true
   end
 
@@ -1178,11 +1256,13 @@ return function(mod)
     if startPreparation then startPreparation(game) end
   end
 
-  local function writeCached(cacheId, def)
+  local function writeCached(cacheId, def, version)
     if not serialize then return end
     local okSer, bytes = pcall(serialize, def)
     if not okSer or type(bytes) ~= "string" then return end
-    local path = cachePath(cacheId, settingsHash(settings))
+    local hash = settingsHash(settings)
+    local path = version and variantCachePath(cacheId, version, hash)
+      or cachePath(cacheId, hash)
     if not indexGeneratedCachePath(path) then
       mod.log:error("music_improvement: skipping unindexed cached file %s", path)
       return
@@ -1218,7 +1298,7 @@ return function(mod)
     extraDefs[entry.improvedId] = translated.extra
     registerImprovedId(entry.improvedId, translated)
     local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId, enabled)
-    writeCached(entry.improvedId, translated)
+    writeCached(entry.improvedId, translated, entry.version)
     return record
   end
 

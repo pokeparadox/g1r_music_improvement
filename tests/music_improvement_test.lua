@@ -497,16 +497,19 @@ if cache and exports and type(cache.delete) == "function" then
   exports.regenerateCache()
   logRemoval = false
 
-  local deletedIndex = false
-  local onlySongCache = true
+  local keptIndex = true
+  local onlyOwnedCache = true
   for _, path in ipairs(deleted) do
     local rel = path:match("^mod_cache/[^/]+/(.*)$") or path
-    if rel == "songs/gold_index.txt" then deletedIndex = true end
-    if rel:sub(1, 11) ~= "songs/gold_" then onlySongCache = false end
+    if rel == "songs/index.txt" then keptIndex = false end
+    local ownBase = rel:sub(1, 11) == "songs/gold_"
+    local sharedVariant = rel:find("_Music_Improved", 1, true)
+      or rel:find("_Music_Stock", 1, true)
+    if not ownBase and not sharedVariant then onlyOwnedCache = false end
   end
-  T.check(deletedIndex, "regeneration deletes its generated-file index")
+  T.check(keptIndex, "regeneration keeps the shared cache index")
   T.check(#deleted > 0, "regeneration deletes cached songs through mod.cache")
-  T.check(onlySongCache, "regeneration leaves unrelated cache namespaces untouched")
+  T.check(onlyOwnedCache, "regeneration only deletes own base and shared variant caches")
   local deletedForeign = false
   for _, path in ipairs(deleted) do
     local rel = path:match("^mod_cache/[^/]+/(.*)$") or path
@@ -595,7 +598,7 @@ T.eq(optionRows[4] and optionRows[4].musicImprovementId, "music_improvement_rege
 if cache and exports and type(cache.delete) == "function" then
   local failurePath = "songs/gold_test_delete_failure.lua"
   cache:write(failurePath, "generated cache")
-  cache:write("songs/gold_index.txt", failurePath .. "\n")
+  cache:write("songs/index.txt", failurePath .. "\n")
   failRemoval = true
   local game = {
     mods = { modOptions = { g1r_music_improvement = { enabled = false } } },
