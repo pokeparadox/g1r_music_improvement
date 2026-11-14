@@ -109,11 +109,7 @@ function M.install(deps)
     pcall(source.setVolume, source, (tonumber(Audio._bgmVolume) or 1) * 0.3)
     pcall(deps.extraAudio.stop)
     chip.extraPending = record.extra
-    if deps.toast then
-      local gen = record.generation and ("G" .. record.generation) or "G1"
-      local tag = record.improved and " IMP" or " STK"
-      pcall(deps.toast, gen, record.label .. tag)
-    end
+    if deps.toast then pcall(deps.toast, record) end
     return true
   end
 
@@ -146,16 +142,35 @@ function M.install(deps)
       if chip.id then pcall(ChipAudio.holdMusic, true) end
       return originalPlay(id, opts)
     end
+    local nativeId = nativeLabel(resolved)
+    -- Music test menu: force native playback or a specific cached variant.
+    if opts.forceNative then
+      pending = nil
+      resetBus()
+      if deps.toast then pcall(deps.toast, nativeId) end
+      return originalPlay(id, opts)
+    end
+    if opts.forceVariant then
+      local forced = opts.forceVariant
+      local rec = forced.candidate and deps.loadVariant(nativeId, forced.candidate,
+        { enabled = forced.improved, source = "gen1" })
+      pending = nil
+      if rec then
+        resetBus()
+        if startChip(resolved, nativeId, rec) then return true end
+      end
+      if deps.toast then pcall(deps.toast, nativeId) end
+      return originalPlay(id, opts)
+    end
     local settings = deps.currentSettings()
     if settings.source == "native" or settings.source == "gen3" then
       pending = nil
       if chip.id then resetBus() end
       if deps.toast then
-        pcall(deps.toast, "G3", nativeLabel(resolved))
+        pcall(deps.toast, nativeId)
       end
       return originalPlay(id, opts)
     end
-    local nativeId = nativeLabel(resolved)
     -- Same variant already playing: do nothing.
     if chip.id == resolved and chip.record and not opts.restart then
       return true
@@ -168,9 +183,7 @@ function M.install(deps)
     if not candidate then
       pending = nil
       if chip.id then resetBus() end
-      if deps.toast then
-        pcall(deps.toast, "G3", nativeLabel(resolved) .. " (no alt)")
-      end
+      if deps.debug then pcall(deps.debug, "no alt for " .. nativeId) end
       return originalPlay(id, opts)
     end
     local enabledList = deps.enabledListFor
@@ -205,7 +218,7 @@ function M.install(deps)
     if record and record.native then
       pending = nil
       if chip.id then resetBus() end
-      if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved)) end
+      if deps.toast then pcall(deps.toast, nativeLabel(resolved)) end
       return originalPlay(id, opts)
     end
     if record then
@@ -213,12 +226,12 @@ function M.install(deps)
       pending = nil
       local ok = startChip(resolved, nativeId, record)
       if not ok then
-        if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (start fail)") end
+        if deps.debug then pcall(deps.debug, "start fail for " .. nativeId) end
         return originalPlay(id, opts)
       end
       return true
     end
-    if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (prep fail)") end
+    if deps.debug then pcall(deps.debug, "prep fail for " .. nativeId) end
     -- Missing variant: play native now and prepare in the background.
     pending = {
       nativeId = nativeId,
@@ -228,7 +241,7 @@ function M.install(deps)
     }
     if chip.id then resetBus() end
     if deps.toast then
-      pcall(deps.toast, "G3", nativeLabel(resolved))
+      pcall(deps.toast, nativeLabel(resolved))
     end
     return originalPlay(id, opts)
   end

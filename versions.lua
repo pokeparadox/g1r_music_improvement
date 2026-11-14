@@ -23,61 +23,98 @@ M.BY_ID = {}
 for _, entry in ipairs(M.VERSIONS) do M.BY_ID[entry.id] = entry end
 
 -- One group per recognisable tune.  Labels must match the dataset registries.
+-- `name` is the canonical display name used by toasts and the music test menu.
 M.EQUIVALENTS = {
-  { gen1 = "Music_Pokecenter", gen2 = "Music_PokemonCenter", gen3 = "MUS_POKE_CENTER" },
+  { gen1 = "Music_Pokecenter", gen2 = "Music_PokemonCenter", gen3 = "MUS_POKE_CENTER",
+    name = "Pokemon Center" },
 
-  { gen1 = "Music_PalletTown", gen2 = "Music_PalletTown", gen3 = "MUS_PALLET" },
-  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN" },
+  { gen1 = "Music_PalletTown", gen2 = "Music_PalletTown", gen3 = "MUS_PALLET",
+    name = "Pallet Town" },
+  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN",
+    name = "Viridian City" },
   { gen1 = "Music_TitleScreen", gen3 = "MUS_TITLE", hosts = { "firered", "leafgreen" },
-      hostSources = { firered = { "red" }, leafgreen = { "blue" } } },
+      hostSources = { firered = { "red" }, leafgreen = { "blue" } },
+      name = "Title Screen" },
   { gen1 = "Music_IntroBattle", gen3 = "MUS_INTRO_FIGHT", hosts = { "firered", "leafgreen" },
-      hostSources = { firered = { "red" }, leafgreen = { "blue" } }, oneshot = true },
-  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER" },
-  { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON" },
-  { gen1 = "Music_Vermilion", gen2 = "Music_VermilionCity", gen3 = "MUS_VERMILLION" },
-  { gen1 = "Music_Lavender", gen2 = "Music_LavenderTown", gen3 = "MUS_LAVENDER" },
-  { gen1 = "Music_Routes1", gen2 = "Music_Route1", gen3 = "MUS_ROUTE1" },
-  { gen1 = "Music_Routes2", gen2 = "Music_Route2", gen3 = "MUS_ROUTE2" },
-  { gen1 = "Music_Routes3", gen2 = "Music_Route3", gen3 = "MUS_ROUTE3" },
-  { gen1 = "Music_Routes4", gen2 = "Music_Route12" },
-  { gen1 = "Music_Gym", gen2 = "Music_Gym", gen3 = "MUS_GYM" },
-  { gen1 = "Music_GymLeaderBattle", gen2 = "Music_KantoGymBattle", gen3 = "MUS_VS_GYM_LEADER" },
-  { gen1 = "Music_TrainerBattle", gen2 = "Music_KantoTrainerBattle", gen3 = "MUS_VS_TRAINER" },
-  { gen1 = "Music_WildBattle", gen2 = "Music_KantoWildBattle", gen3 = "MUS_VS_WILD" },
-  { gen1 = "Music_FinalBattle", gen2 = "Music_ChampionBattle", gen3 = "MUS_VS_CHAMPION" },
-  { gen1 = "Music_MeetRival", gen2 = "Music_RivalBattle", gen3 = "MUS_ENCOUNTER_RIVAL" },
-  { gen1 = "Music_MeetEvilTrainer", gen2 = "Music_RocketBattle" },
-  { gen1 = "Music_Dungeon1", gen2 = "Music_MtMoon", gen3 = "MUS_MT_MOON" },
-  { gen1 = "Music_Dungeon2", gen2 = "Music_UnionCave" },
-  { gen1 = "Music_Dungeon3", gen2 = "Music_DarkCave" },
-  { gen1 = "Music_IndigoPlateau", gen2 = "Music_IndigoPlateau", gen3 = "MUS_VICTORY_ROAD" },
-  { gen1 = "Music_Surfing", gen2 = "Music_Surf", gen3 = "MUS_SURF" },
-  { gen1 = "Music_BikeRiding", gen2 = "Music_Bicycle", gen3 = "MUS_CYCLING" },
-  { gen1 = "Music_Credits", gen2 = "Music_Credits", gen3 = "MUS_CREDITS" },
-  { gen1 = "Music_HallOfFame", gen2 = "Music_HallOfFame", gen3 = "MUS_HALL_OF_FAME" },
-  { gen1 = "Music_GameCorner", gen2 = "Music_GameCorner", gen3 = "MUS_GAME_CORNER" },
-  { gen1 = "Music_SSAnne", gen2 = "Music_SSAqua", gen3 = "MUS_SS_ANNE" },
-  { gen1 = "Music_PokemonTower", gen2 = "Music_TinTower", gen3 = "MUS_POKE_TOWER" },
-  { gen1 = "Music_CinnabarMansion", gen3 = "MUS_POKE_MANSION" },
+      hostSources = { firered = { "red" }, leafgreen = { "blue" } }, oneshot = true,
+      name = "Intro Battle" },
+  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER",
+    name = "Pewter City" },
+  { gen1 = "Music_Celadon", gen2 = "Music_CeladonCity", gen3 = "MUS_CELADON",
+    name = "Celadon City" },
+  { gen1 = "Music_Vermilion", gen2 = "Music_VermilionCity", gen3 = "MUS_VERMILLION",
+    name = "Vermilion City" },
+  { gen1 = "Music_Lavender", gen2 = "Music_LavenderTown", gen3 = "MUS_LAVENDER",
+    name = "Lavender Town" },
+  { gen1 = "Music_Routes1", gen2 = "Music_Route1", gen3 = "MUS_ROUTE1",
+    name = "Route 1" },
+  { gen1 = "Music_Routes2", gen2 = "Music_Route2", gen3 = "MUS_ROUTE2",
+    name = "Route 2" },
+  { gen1 = "Music_Routes3", gen2 = "Music_Route3", gen3 = "MUS_ROUTE3",
+    name = "Route 3" },
+  { gen1 = "Music_Routes4", gen2 = "Music_Route12", name = "Route 12" },
+  { gen1 = "Music_Gym", gen2 = "Music_Gym", gen3 = "MUS_GYM", name = "Gym" },
+  { gen1 = "Music_GymLeaderBattle", gen2 = "Music_KantoGymBattle", gen3 = "MUS_VS_GYM_LEADER",
+    name = "Gym Leader Battle" },
+  { gen1 = "Music_TrainerBattle", gen2 = "Music_KantoTrainerBattle", gen3 = "MUS_VS_TRAINER",
+    name = "Trainer Battle" },
+  { gen1 = "Music_WildBattle", gen2 = "Music_KantoWildBattle", gen3 = "MUS_VS_WILD",
+    name = "Wild Battle" },
+  { gen1 = "Music_FinalBattle", gen2 = "Music_ChampionBattle", gen3 = "MUS_VS_CHAMPION",
+    name = "Champion Battle" },
+  { gen1 = "Music_MeetRival", gen2 = "Music_RivalBattle", gen3 = "MUS_ENCOUNTER_RIVAL",
+    name = "Rival Encounter" },
+  { gen1 = "Music_MeetEvilTrainer", gen2 = "Music_RocketBattle",
+    name = "Evil Trainer Encounter" },
+  { gen1 = "Music_Dungeon1", gen2 = "Music_MtMoon", gen3 = "MUS_MT_MOON",
+    name = "Mt. Moon" },
+  { gen1 = "Music_Dungeon2", gen2 = "Music_UnionCave", name = "Union Cave" },
+  { gen1 = "Music_Dungeon3", gen2 = "Music_DarkCave", name = "Dark Cave" },
+  { gen1 = "Music_IndigoPlateau", gen2 = "Music_IndigoPlateau", gen3 = "MUS_VICTORY_ROAD",
+    name = "Indigo Plateau" },
+  { gen1 = "Music_Surfing", gen2 = "Music_Surf", gen3 = "MUS_SURF", name = "Surfing" },
+  { gen1 = "Music_BikeRiding", gen2 = "Music_Bicycle", gen3 = "MUS_CYCLING",
+    name = "Bicycle" },
+  { gen1 = "Music_Credits", gen2 = "Music_Credits", gen3 = "MUS_CREDITS",
+    name = "Credits" },
+  { gen1 = "Music_HallOfFame", gen2 = "Music_HallOfFame", gen3 = "MUS_HALL_OF_FAME",
+    name = "Hall of Fame" },
+  { gen1 = "Music_GameCorner", gen2 = "Music_GameCorner", gen3 = "MUS_GAME_CORNER",
+    name = "Game Corner" },
+  { gen1 = "Music_SSAnne", gen2 = "Music_SSAqua", gen3 = "MUS_SS_ANNE",
+    name = "S.S. Anne" },
+  { gen1 = "Music_PokemonTower", gen2 = "Music_TinTower", gen3 = "MUS_POKE_TOWER",
+    name = "Pokemon Tower" },
+  { gen1 = "Music_CinnabarMansion", gen3 = "MUS_POKE_MANSION",
+    name = "Pokemon Mansion" },
 
-  { gen1 = "Music_MeetProfOak", gen2 = "Music_ProfOak", gen3 = "MUS_OAK" },
+  { gen1 = "Music_MeetProfOak", gen2 = "Music_ProfOak", gen3 = "MUS_OAK",
+    name = "Professor Oak" },
   { gen1 = "Music_OaksLab", gen3 = "MUS_OAK_LAB", hosts = { "firered", "leafgreen" },
-      hostSources = { firered = { "red", "blue", "yellow" }, leafgreen = { "red", "blue", "yellow" } } },
-  { gen1 = "Music_DefeatedGymLeader", gen2 = "Music_GymLeaderVictory", gen3 = "MUS_VICTORY_GYM_LEADER" },
-  { gen1 = "Music_DefeatedTrainer", gen2 = "Music_TrainerVictory", gen3 = "MUS_VICTORY_TRAINER" },
-  { gen1 = "Music_DefeatedWildMon", gen2 = "Music_WildPokemonVictory", gen3 = "MUS_VICTORY_WILD" },
-  { gen1 = "Music_PkmnHealed", gen2 = "Music_HealPokemon", gen3 = "MUS_HEAL" },
-  { gen1 = "Music_JigglypuffSong", gen2 = "Music_PokemonLullaby", gen3 = "MUS_JIGGLYPUFF" },
+      hostSources = { firered = { "red", "blue", "yellow" }, leafgreen = { "red", "blue", "yellow" } },
+      name = "Oak's Lab" },
+  { gen1 = "Music_DefeatedGymLeader", gen2 = "Music_GymLeaderVictory", gen3 = "MUS_VICTORY_GYM_LEADER",
+    name = "Gym Leader Victory" },
+  { gen1 = "Music_DefeatedTrainer", gen2 = "Music_TrainerVictory", gen3 = "MUS_VICTORY_TRAINER",
+    name = "Trainer Victory" },
+  { gen1 = "Music_DefeatedWildMon", gen2 = "Music_WildPokemonVictory", gen3 = "MUS_VICTORY_WILD",
+    name = "Wild Victory" },
+  { gen1 = "Music_PkmnHealed", gen2 = "Music_HealPokemon", gen3 = "MUS_HEAL",
+    name = "Pokemon Healed" },
+  { gen1 = "Music_JigglypuffSong", gen2 = "Music_PokemonLullaby", gen3 = "MUS_JIGGLYPUFF",
+    name = "Jigglypuff Song" },
 
-  { gen1 = "Music_SafariZone", gen2 = "Music_NationalPark", gen3 = "MUS_SAFARI_ZONE" },
-  { gen1 = "Music_SilphCo", gen3 = "MUS_SILPH" },
-  { gen2 = "Music_Evolution", gen3 = "MUS_EVOLUTION" },
+  { gen1 = "Music_SafariZone", gen2 = "Music_NationalPark", gen3 = "MUS_SAFARI_ZONE",
+    name = "Safari Zone" },
+  { gen1 = "Music_SilphCo", gen3 = "MUS_SILPH", name = "Silph Co." },
+  { gen2 = "Music_Evolution", gen3 = "MUS_EVOLUTION", name = "Evolution" },
 }
 
 M.byLabel = {}
 for _, group in ipairs(M.EQUIVALENTS) do
   for generation, label in pairs(group) do
-    if generation == "gen1" or generation == "gen2" or generation == "gen3" then
+    if (generation == "gen1" or generation == "gen2" or generation == "gen3")
+        and not M.byLabel[label] then
       M.byLabel[label] = group
     end
   end
@@ -89,6 +126,45 @@ end
 
 function M.labelFor(group, generation)
   return group and group[generation] or nil
+end
+
+function M.pretty(label)
+  label = tostring(label or "")
+  label = label:gsub("^Music_", ""):gsub("^MUS_", "")
+  label = label:gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+  return label
+end
+
+-- Canonical name for a dataset label.  Falls back to the pretty-printed id.
+function M.nameFor(label)
+  local group = M.byLabel[label]
+  return (group and group.name) or M.pretty(label)
+end
+
+-- Describe a song id for the toast: { generation, name, kind }.
+-- kind is "Improved"/"Stock" for chip variants, nil for base songs.
+function M.describe(id, hostGeneration)
+  local raw = tostring(id or "")
+  local generation = hostGeneration or 1
+  local kind, base, version = raw:match("^Music_(Improved)(.-)_([%w]+)$")
+  if not kind then
+    kind, base, version = raw:match("^Music_(Stock)(.-)_([%w]+)$")
+  end
+  if kind then
+    local source = M.BY_ID[version]
+    if source then generation = source.generation end
+    local label = "Music_" .. base
+    return {
+      generation = generation,
+      name = M.nameFor(label),
+      kind = kind == "Improved" and "Improved" or "Stock",
+    }
+  end
+  local group = M.byLabel[raw]
+  if group then
+    return { generation = generation, name = group.name or M.pretty(raw) }
+  end
+  return { generation = generation, name = M.pretty(raw) }
 end
 
 -- `available(version, label)` filters to imported datasets that actually carry

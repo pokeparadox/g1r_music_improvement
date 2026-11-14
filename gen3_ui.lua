@@ -25,6 +25,8 @@ function M.openList(game, opts)
     scroll = 0,
     onChoose = opts.onChoose,
     onCancel = opts.onCancel,
+    onCycle = opts.onCycle,
+    onSelect = opts.onSelect,
     stayOpen = opts.stayOpen,
   }
   local F = font()
@@ -48,6 +50,14 @@ function M.openList(game, opts)
     end
   end
 
+  local function textWidth(text)
+    if F and F.measure then
+      local ok, width = pcall(F.measure, text)
+      if ok and tonumber(width) then return tonumber(width) end
+    end
+    return #tostring(text or "") * 6
+  end
+
   function menu.draw()
     local G = love.graphics
     G.push("all")
@@ -60,8 +70,11 @@ function M.openList(game, opts)
       if not item then break end
       local selected = i == menu.index
       local colors = F and (selected and F.COLOR.RED or F.COLOR.WHITE) or nil
-      drawText((selected and "> " or "  ") .. tostring(item.label or item),
-        8, 22 + (row - 1) * 14, colors)
+      local y = 22 + (row - 1) * 14
+      drawText((selected and "> " or "  ") .. tostring(item.label or item), 8, y, colors)
+      if item.right then
+        drawText(item.right, G.getWidth() - 8 - textWidth(item.right), y)
+      end
     end
     G.pop()
   end
@@ -79,6 +92,13 @@ function M.openList(game, opts)
     elseif input:wasPressed("down") then
       menu.index = menu.index + 1
       clamp()
+    elseif input:wasPressed("left") or input:wasPressed("right") then
+      local item = menu.items[menu.index]
+      local dir = input:wasPressed("left") and -1 or 1
+      if item and menu.onCycle then pcall(menu.onCycle, item, dir) end
+    elseif input:wasPressed("select") then
+      local item = menu.items[menu.index]
+      if item and menu.onSelect then pcall(menu.onSelect, item) end
     elseif input:wasPressed("a") then
       local item = menu.items[menu.index]
       if item then
@@ -92,7 +112,7 @@ function M.openList(game, opts)
 
   clamp()
   Stack.push(LAYER, menu, { hideBelow = true, fullscreen = true })
-  return true
+  return menu
 end
 
 return M

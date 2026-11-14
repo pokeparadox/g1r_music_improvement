@@ -49,6 +49,7 @@ return function(mod)
   if not improveModule then return end
   local versions = loadModFile("versions.lua")
   if not versions then return end
+  local musicMenu = loadModFile("music_menu.lua")
   local improve = function(src, settings) return improveModule.improve(src, settings) end
   local extraSpec = function(src, settings) return improveModule.extra(src, settings) end
   local serialize = loadModFile("serialize.lua")
@@ -595,6 +596,7 @@ return function(mod)
   local stagedImprovedMap = {}
   local variantMap = {}
   local variantByKey = {}
+  local recordById = {}
   local lastVariant = {}
   local sourceCache = {}
   local currentImproved = false
@@ -617,26 +619,31 @@ return function(mod)
   local applyAll = true
 
   local toast = { text = nil, until_ = 0 }
-  local function prettySongLabel(label)
-    label = tostring(label or "")
-    label = label:gsub("^Music_", ""):gsub("^MUS_", "")
-    label = label:gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
-    return label
-  end
-  local function showToast(gen, label)
-    toast.text = string.format("%s %s", tostring(gen or ""), prettySongLabel(label))
-    toast.until_ = os.clock() + 2.5
-  end
-  local function genForSong(song)
-    local suffix = tostring(song or ""):match("_([%w]+)$")
-    if suffix and versions.BY_ID and versions.BY_ID[suffix] then
-      return "G" .. tostring(versions.BY_ID[suffix].generation)
-    end
-    local host = 1
+  local function hostGeneration()
     if okGameVersion and GameVersion and GameVersion.generation then
-      host = GameVersion.generation(okGameVersion and GameVersion.get and GameVersion.get() or "red") or 1
+      local version = GameVersion.get and GameVersion.get() or "red"
+      return GameVersion.generation(version) or 1
     end
-    return "G" .. tostring(host)
+    return 1
+  end
+  -- Toast format: G<n> <Canonical Name> [(Improved|Stock)]
+  local function showToast(value)
+    local generation, name, kind
+    local record = type(value) == "table" and value or recordById[value]
+    if record then
+      generation = record.generation or 1
+      name = record.name
+        or versions.nameFor(record.label or "")
+      if not record.native then
+        kind = record.improved and "Improved" or "Stock"
+      end
+    else
+      local info = versions.describe(value, hostGeneration())
+      generation, name, kind = info.generation, info.name, info.kind
+    end
+    toast.text = string.format("G%d %s%s", generation, name,
+      kind and (" (" .. kind .. ")") or "")
+    toast.until_ = os.clock() + 2.5
   end
   local function improvedIdFor(name)
     return "Music_Improved" .. tostring(name):gsub("^Music_", "")
@@ -759,10 +766,13 @@ return function(mod)
       extra = extraDefs[improvedId],
       version = candidate.version,
       label = candidate.label,
+      candidate = candidate,
+      name = versions.nameFor(candidate.label),
       generation = candidate.generation,
       improved = enabled,
     }
     variantByKey[key] = record
+    recordById[improvedId] = record
     local list = variantMap[nativeId]
     if not list then list = {}; variantMap[nativeId] = list end
     for index = #list, 1, -1 do
@@ -1011,6 +1021,7 @@ return function(mod)
     stagedImprovedMap = {}
     variantMap = {}
     variantByKey = {}
+    recordById = {}
     lastVariant = {}
     sourceCache = {}
     extraDefs = {}
@@ -1377,34 +1388,60 @@ return function(mod)
   end
   mod.exports.musicIds = musicIds
 
+  -- Forward declarations: the jukebox registration and rows hook run before
+  -- the helpers below are defined, but their closures execute later.
+  local hostIsGen3, openGen3Jukebox, gen3SongIds
+  local musicTestEntries, musicTestItems, musicTestPlay
+  local musicTestImproved = true
+
   -- jukebox screen
   mod.content.screens:register("MusicImprovementJukebox", {
     new = function(game)
-      local ids = musicIds(game)
-      local items = {}
-      for _, id in ipairs(ids) do
-        items[#items + 1] = { label = id:gsub("^Music_", ""), value = id }
-      end
-      local menu = mod.ui.ListMenu.new(game, "MUSIC TEST", items, {
-        onChoose = function(item)
-          require("src.core.Music").play(game.data, item.value, true,
-            { reason = "jukebox" })
-        end,
+      local items = musicTestItems(musicTestEntries(game))
+      local menu = mod.ui.ListMenu.new(game, musicMenu.title(musicTestImproved), items, {
+        onChoose = function(item) musicTestPlay(game, item) end,
         onCancel = function()
           require("src.core.Music").stop()
         end,
       })
-      if items[1] and mod.options:get("enabled") ~= false and not state.skipped then
-        require("src.core.Music").play(game.data, items[1].value, true,
-          { reason = "jukebox" })
+      local baseUpdate = menu.update
+      menu.update = function(self, dt)
+        local input = self.game and self.game.input
+        local item = self.items[self.index]
+        if input and item and item.entry then
+          if input:wasPressed("left") or input:wasPressed("right") then
+            local dir = input:wasPressed("left") and -1 or 1
+            local variant = musicMenu.cycle(item.entry, item.versionKey, dir,
+              musicTestImproved)
+            if variant then
+              item.variant = variant
+              item.versionKey = musicMenu.versionKey(variant)
+              item.right = musicMenu.rightText(variant)
+              musicTestPlay(game, item)
+            end
+            return
+          elseif input:wasPressed("select") then
+            musicTestImproved = not musicTestImproved
+            for _, row in ipairs(self.items) do
+              local variant = musicMenu.select(row.entry, row.versionKey,
+                musicTestImproved)
+              if variant then
+                row.variant = variant
+                row.versionKey = musicMenu.versionKey(variant)
+                row.right = musicMenu.rightText(variant)
+              end
+            end
+            self.title = musicMenu.title(musicTestImproved)
+            musicTestPlay(game, item)
+            return
+          end
+        end
+        return baseUpdate(self, dt)
       end
+      if items[1] then musicTestPlay(game, items[1]) end
       return menu
     end,
   })
-
-  -- Forward declarations: rows hook is registered before the gen3 helpers
-  -- below are defined, but its closures run later.
-  local hostIsGen3, openGen3Jukebox
 
   mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     local out = next(game, rows)
@@ -1573,7 +1610,7 @@ return function(mod)
     return ok and generation == 3
   end
 
-  local function gen3SongIds(game)
+  gen3SongIds = function(game)
     local ids = {}
     local okSong, Song = pcall(require, "src.core.game3.song_ids")
     if not okSong or type(Song) ~= "table" or not Song.forVersion then
@@ -1583,7 +1620,7 @@ return function(mod)
       cacheGameId(game or readyGame))
     if not okSongs or type(songs) ~= "table" then return ids end
     for label in pairs(songs) do
-      if tostring(label):match("^MUS_") and versions.byLabel[label] then
+      if tostring(label):match("^MUS_") then
         ids[#ids + 1] = label
       end
     end
@@ -1600,30 +1637,172 @@ return function(mod)
     return gen3Audio or nil
   end
 
+  local function gen3SongId(label, game)
+    local okSong, Song = pcall(require, "src.core.game3.song_ids")
+    if not okSong or type(Song) ~= "table" or not Song.forVersion then
+      return nil
+    end
+    local okSongs, songs = pcall(Song.forVersion,
+      cacheGameId(game or readyGame))
+    if okSongs and type(songs) == "table" then return songs[label] end
+    return nil
+  end
+
+  -- Music test entries: mapped groups first, then unmapped native songs.
+  musicTestEntries = function(game)
+    local hostVersion = cacheGameId(game or readyGame)
+    local hostGen = 1
+    if okGameVersion and GameVersion and GameVersion.generation then
+      hostGen = GameVersion.generation(hostVersion) or hostGen
+    end
+    local entries, seen = {}, {}
+    local function add(entry)
+      if seen[entry.nativeId] then return end
+      seen[entry.nativeId] = true
+      entries[#entries + 1] = entry
+    end
+    for _, group in ipairs(versions.EQUIVALENTS) do
+      local label = group["gen" .. hostGen]
+      local allowed = true
+      if group.hosts then
+        allowed = false
+        for _, host in ipairs(group.hosts) do
+          if host == hostVersion then allowed = true break end
+        end
+      end
+      if label and allowed then
+        local variants = { { native = true, generation = hostGen } }
+        local records = {}
+        for _, record in ipairs(variantMap[label] or {}) do
+          records[#records + 1] = record
+        end
+        table.sort(records, function(a, b)
+          if a.generation ~= b.generation then
+            return a.generation < b.generation
+          end
+          if a.version ~= b.version then
+            return tostring(a.version) < tostring(b.version)
+          end
+          return (not a.improved) and b.improved or false
+        end)
+        for _, record in ipairs(records) do
+          variants[#variants + 1] = {
+            candidate = record.candidate,
+            improved = record.improved,
+            generation = record.generation,
+            version = record.version,
+            id = record.id,
+          }
+        end
+        add({
+          name = group.name or versions.pretty(label),
+          nativeId = label,
+          variants = variants,
+        })
+      end
+    end
+    local natives = hostGen == 3 and gen3SongIds(game) or musicIds(game)
+    for _, id in ipairs(natives) do
+      if not versions.byLabel[id]
+          and not tostring(id):match("^Music_(Improved|Stock)") then
+        add({
+          name = versions.pretty(id),
+          nativeId = id,
+          variants = { { native = true, generation = hostGen } },
+        })
+      end
+    end
+    table.sort(entries, function(a, b)
+      return a.name:lower() < b.name:lower()
+    end)
+    return entries
+  end
+
+  musicTestItems = function(entries)
+    local items = {}
+    for _, entry in ipairs(entries) do
+      local variant = musicMenu.select(entry, "", musicTestImproved)
+        or entry.variants[1]
+      items[#items + 1] = {
+        label = entry.name,
+        entry = entry,
+        variant = variant,
+        versionKey = musicMenu.versionKey(variant),
+        right = musicMenu.rightText(variant),
+      }
+    end
+    return items
+  end
+
+  musicTestPlay = function(game, item)
+    if not (item and item.entry and item.variant) then return end
+    local entry, variant = item.entry, item.variant
+    if hostIsGen3(game) then
+      local A = audio3()
+      local numeric = gen3SongId(entry.nativeId, game)
+      if not (A and A.playSong and numeric) then return end
+      if variant.native then
+        pcall(A.playSong, numeric, { forceNative = true })
+      else
+        pcall(A.playSong, numeric, {
+          forceVariant = { candidate = variant.candidate, improved = variant.improved },
+        })
+      end
+      return
+    end
+    local id = variant.id or entry.nativeId
+    local target = okMusic and Music or require("src.core.Music")
+    pcall(target.play, game.data, id, true, { reason = "jukebox" })
+  end
+
   openGen3Jukebox = function(game)
     local ui = gen3Ui()
     if not ui then return false end
-    local items = {}
-    for _, id in ipairs(gen3SongIds(game)) do
-      items[#items + 1] = { label = id:gsub("^MUS_", ""), value = id }
-    end
+    local items = musicTestItems(musicTestEntries(game))
     if #items == 0 then
-      items[1] = { label = "(NO SONGS)", value = nil }
+      items[1] = { label = "(NO SONGS)" }
     end
-    return ui.openList(game, {
-      title = "MUSIC TEST",
+    local menu
+    menu = ui.openList(game, {
+      title = musicMenu.title(musicTestImproved),
       items = items,
       stayOpen = true,
-      onChoose = function(item)
-        if not item.value then return end
-        local A = audio3()
-        if A and A.playSong then pcall(A.playSong, item.value) end
+      onChoose = function(item) musicTestPlay(game, item) end,
+      onCycle = function(item, dir)
+        local variant = musicMenu.cycle(item.entry, item.versionKey, dir,
+          musicTestImproved)
+        if variant then
+          item.variant = variant
+          item.versionKey = musicMenu.versionKey(variant)
+          item.right = musicMenu.rightText(variant)
+          musicTestPlay(game, item)
+        end
+      end,
+      onSelect = function(item)
+        musicTestImproved = not musicTestImproved
+        for _, row in ipairs(items) do
+          if row.entry then
+            local variant = musicMenu.select(row.entry, row.versionKey,
+              musicTestImproved)
+            if variant then
+              row.variant = variant
+              row.versionKey = musicMenu.versionKey(variant)
+              row.right = musicMenu.rightText(variant)
+            end
+          end
+        end
+        if menu then menu.title = musicMenu.title(musicTestImproved) end
+        musicTestPlay(game, item)
       end,
       onCancel = function()
         local A = audio3()
         if A and A.stopAll then pcall(A.stopAll) end
       end,
     })
+    if menu and items[1] and items[1].entry then
+      musicTestPlay(game, items[1])
+    end
+    return menu
   end
 
   local function openGen3Confirm(game)
@@ -1735,7 +1914,8 @@ return function(mod)
     if extraAudio then
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
-      local enhancementActive = mod.options:get("enabled") ~= false
+      local enhancementActive = (mod.options:get("enabled") ~= false
+          or currentReason == "jukebox")
         and not state.skipped and not suppressExtra
       if extra and enhancementActive then
         pendingLooping = currentReason ~= "once"
@@ -1762,7 +1942,7 @@ return function(mod)
       end
     end
     pcall(applyChannelMix)
-    if song then showToast(genForSong(song), song) end
+    if song then showToast(song) end
   end)
   mod.events:on("music.stopped", function()
     currentImproved = false
@@ -1831,6 +2011,9 @@ return function(mod)
           enabledListFor = enabledListFor,
           extraAudio = extra,
           toast = showToast,
+          debug = function(message)
+            pcall(mod.log.info, mod.log, "gen3: %s", tostring(message))
+          end,
           isQuestLog = function() return readyGame ~= nil and readyGame.phase == "quest_log" end,
         })
       end
