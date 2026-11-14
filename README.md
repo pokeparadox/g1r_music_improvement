@@ -53,7 +53,7 @@ This keeps the enhanced soundtrack consistent with the game's original audio arc
 ### 💾 Music Preparation and Caching
 - On first launch, choose whether to generate the enhanced music cache; choosing **NO** skips enhanced playback.
 - Enhanced arrangements are generated and cached after choosing **YES**.
-- The Options menu exposes the enhancement toggle, Music Test, and cache regeneration inside Gold's Audio options.
+- The Options menu exposes the enhancement toggle, Music Test, and cache regeneration inside Audio options.
 - Cached music can be regenerated through the mod options; regeneration removes only indexed generated files and known legacy song-cache filenames.
 
 ### 🎼 Music Testing
@@ -69,12 +69,10 @@ Includes a music testing/jukebox screen that allows available music tracks to be
 ### 🔀 Cross-Version Sourcing
 - Any Gen1 or Gen2 song can be sourced from another Gen1/Gen2 version (red, blue, yellow, gold, silver, crystal) for its improved arrangement.
 - Shuffle modes: `shuffle_all`, `shuffle_improved`, `shuffle_stock`, `gen1`, `gen2`; each song change rolls a new source version.
-- Intro/title themes stay native (with FRLG exceptions); Oak's Lab is Gen1-only; Pewter City maps to the Cities1 tune.
-- No music plays during the Gen3 quest-log recap; the Gen1 intro battle works as a one-shot in FRLG.
 
 ### 🎮 Gen3 (FRLG) Support
-- Gen3 audio is native-only (GBA); improved playback uses the Gen1/Gen2 chip arrangements.
-- Chip audio plays at 45% volume on Gen3.
+- Gen3 audio is native-only (GBA) but can make use of Gen1/Gen2 chip arrangements.
+- Chip audio plays at 45% volume on Gen3 to try and match the level of the native audio.
 - Music test and the startup enhancement prompt use a Gen3 stack modal with hints.
 
 ### 💾 Cache Consolidation
