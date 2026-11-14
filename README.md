@@ -59,6 +59,29 @@ This keeps the enhanced soundtrack consistent with the game's original audio arc
 ### 🎼 Music Testing
 Includes a music testing/jukebox screen that allows available music tracks to be selected and played directly.
 
+- Lists each unique song once, with its available source generations.
+- **Left/Right** cycles the source **generation** of the selected song.
+- **Select** toggles between **Improved** and **Stock** arrangements for that generation.
+- **A** plays the selected arrangement; **B** exits.
+- Control hints are shown at the bottom of the screen (including on Gen3).
+- Toasts announce playback as `G<n> <Canonical Name> (Improved|Stock)`.
+
+### 🔀 Cross-Version Sourcing
+- Any Gen1 or Gen2 song can be sourced from another Gen1/Gen2 version (red, blue, yellow, gold, silver, crystal) for its improved arrangement.
+- Shuffle modes: `shuffle_all`, `shuffle_improved`, `shuffle_stock`, `gen1`, `gen2`; each song change rolls a new source version.
+- Intro/title themes stay native (with FRLG exceptions); Oak's Lab is Gen1-only; Pewter City maps to the Cities1 tune.
+- No music plays during the Gen3 quest-log recap; the Gen1 intro battle works as a one-shot in FRLG.
+
+### 🎮 Gen3 (FRLG) Support
+- Gen3 audio is native-only (GBA); improved playback uses the Gen1/Gen2 chip arrangements.
+- Chip audio plays at 45% volume on Gen3.
+- Music test and the startup enhancement prompt use a Gen3 stack modal with hints.
+
+### 💾 Cache Consolidation
+- Base songs are cached per host version; improved variants are shared across hosts by source version.
+- Cache files are content-addressed by hash, with a single `songs/index.txt` and `songs/aliases.lua`.
+- Legacy per-game indexes are merged and pruned on load; identical translations are deduplicated.
+
 ## Compared to the Original Soundtrack
 
 | Feature | Original Game Music | Music Improvement |
