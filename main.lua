@@ -772,8 +772,11 @@ return function(mod)
     return record
   end
 
+  local candidateCache = {}
   local function candidatesFor(nativeId, s)
     if s.source == "native" then return {} end
+    local cacheKey = tostring(nativeId) .. "|" .. tostring(s.source) .. "|" .. tostring(activeCacheGame)
+    if candidateCache[cacheKey] then return candidateCache[cacheKey] end
     local hostGeneration = 1
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
@@ -781,11 +784,15 @@ return function(mod)
     local list = versions.candidates(nativeId, hostGeneration, activeCacheGame,
       function(version, label) return sourceHasSong(sourceFor(version), label) end)
     local wanted = versions.generationForMode(s.source)
-    if not wanted then return list end
+    if not wanted then
+      candidateCache[cacheKey] = list
+      return list
+    end
     local filtered = {}
     for _, candidate in ipairs(list) do
       if candidate.generation == wanted then filtered[#filtered + 1] = candidate end
     end
+    candidateCache[cacheKey] = filtered
     return filtered
   end
 
@@ -975,6 +982,24 @@ return function(mod)
     pcall(Music.play, musicData(), song, loop, { reason = currentReason or "map" })
   end
 
+  local queuedVariantKeys = {}
+  local function queueVariant(nativeId, candidate, enabled)
+    local key = tostring(nativeId) .. "|" .. variantKeyFor(candidate, enabled)
+    if queuedVariantKeys[key] then return end
+    queuedVariantKeys[key] = true
+    queue[#queue + 1] = {
+      kind = "variant",
+      nativeId = nativeId,
+      improvedId = variantIdFor(nativeId, candidate.version, enabled),
+      version = candidate.version,
+      label = candidate.label,
+      generation = candidate.generation,
+      enabled = enabled,
+    }
+    total = #queue
+    state.pending = true
+  end
+
   local function chooseVariant(nativeId)
     local s = currentSettings()
     if s.source == "native" then return nil end
@@ -985,8 +1010,7 @@ return function(mod)
       for _, enabled in ipairs(enabledList) do
         local key = variantKeyFor(candidate, enabled)
         if not variantByKey[key] then
-          pcall(ensureVariant, nativeId, candidate,
-            { enabled = enabled, source = s.source })
+          queueVariant(nativeId, candidate, enabled)
         end
       end
     end
@@ -1030,6 +1054,8 @@ return function(mod)
     lastVariant = {}
     sourceCache = {}
     extraDefs = {}
+    candidateCache = {}
+    queuedVariantKeys = {}
     completed = 0
     total = 0
     local queuedVariant = {}
@@ -1738,7 +1764,7 @@ return function(mod)
         state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
       end
       local result = nextUpdate(self, dt)
-      if state.pending and state.skipped then prepareOne(self) end
+      if state.pending and (state.skipped or not state.progressInstance) then prepareOne(self) end
       frameGuard(dt)
       -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
       -- Start harmony after it, in the same frame, instead of one frame late.

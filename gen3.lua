@@ -179,15 +179,8 @@ function M.install(deps)
     for _, enabled in ipairs(enabledList) do
       local s2 = { enabled = enabled, source = settings.source }
       local rec = deps.loadVariant(nativeId, candidate, s2)
-      if not rec then
-        local ok, err = pcall(function()
-          rec = deps.ensureVariant(nativeId, candidate, s2)
-        end)
-        if not ok then
-          if deps.toast then pcall(deps.toast, "G3", nativeLabel(resolved) .. " (exc: " .. tostring(err):sub(1,40) .. ")") end
-          rec = nil
-        end
-      end
+      -- Do not translate on the audio thread; uncached variants are prepared
+      -- in the background (Audio.update) and used on the next playSong.
       if rec then records[#records + 1] = rec end
     end
     -- Filter by shuffle mode.
