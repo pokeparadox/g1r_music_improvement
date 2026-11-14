@@ -1818,7 +1818,8 @@ return function(mod)
     local natives = hostGen == 3 and gen3SongIds(game) or musicIds(game)
     for _, id in ipairs(natives) do
       if not versions.byLabel[id]
-          and not tostring(id):match("^Music_(Improved|Stock)") then
+          and not tostring(id):match("^Music_Improved")
+          and not tostring(id):match("^Music_Stock") then
         add({
           name = versions.pretty(id),
           nativeId = id,

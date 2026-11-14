@@ -44,16 +44,15 @@ local entry = {
 eq(menu.rightText(entry.variants[1]), "G1", "native label")
 eq(menu.rightText(entry.variants[2]), "G2 STK", "stock label")
 eq(menu.rightText(entry.variants[3]), "G2 IMP", "improved label")
-eq(#menu.versionKeys(entry), 3, "version slots")
+eq(#menu.versionKeys(entry), 2, "version slots")
 
 eq(menu.select(entry, "", true).native, true, "native slot")
-eq(menu.select(entry, "gold", true).id, "I2", "improved pick")
-eq(menu.select(entry, "gold", false).id, "S2", "stock pick")
-eq(menu.select(entry, "crystal", false).id, "I3", "fallback other kind")
+eq(menu.select(entry, "2", true).id, "I2", "improved pick")
+eq(menu.select(entry, "2", false).id, "S2", "stock pick")
 
 eq(menu.cycle(entry, "", 1, true).version, "gold", "cycle forward")
-eq(menu.cycle(entry, "", -1, true).version, "crystal", "cycle wraps back")
-eq(menu.cycle(entry, "crystal", 1, true).native, true, "cycle wraps forward")
+eq(menu.cycle(entry, "", -1, true).version, "gold", "cycle wraps back")
+eq(menu.cycle(entry, "2", 1, true).native, true, "cycle wraps forward")
 eq(menu.title(true), "MUSIC TEST [IMP]", "improved title")
 eq(menu.title(false), "MUSIC TEST [STK]", "stock title")
 

@@ -7,7 +7,7 @@ local M = {}
 -- Version identity for cycling: native playback is its own slot.
 function M.versionKey(variant)
   if not variant or variant.native then return "" end
-  return tostring(variant.version or "")
+  return tostring(variant.generation or "")
 end
 
 function M.rightText(variant)
