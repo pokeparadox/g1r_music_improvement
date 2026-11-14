@@ -768,14 +768,15 @@ return function(mod)
     return { userEnabled ~= false }
   end
 
-  local function variantKeyFor(candidate, enabled)
-    return tostring(candidate.version) .. ":" .. tostring(candidate.label)
+  local function variantKeyFor(nativeId, candidate, enabled)
+    return tostring(nativeId or "") .. "|" .. tostring(candidate.version)
+      .. ":" .. tostring(candidate.label)
       .. ":" .. (enabled and "I" or "S")
   end
 
   local function rememberVariant(nativeId, candidate, def, improvedId, enabled)
     if enabled == nil then enabled = improvedId:match("^Music_Improved") ~= nil end
-    local key = variantKeyFor(candidate, enabled)
+    local key = variantKeyFor(nativeId, candidate, enabled)
     local record = {
       key = key,
       id = improvedId,
@@ -828,7 +829,7 @@ return function(mod)
   local function loadVariant(nativeId, candidate, s)
     if not candidate then return nil end
     local enabled = (s and s.enabled ~= false)
-    local key = variantKeyFor(candidate, enabled)
+    local key = variantKeyFor(nativeId, candidate, enabled)
     local existing = variantByKey[key]
     if existing and existing.def then return existing end
     local improvedId = variantIdFor(nativeId, candidate.version, enabled)
@@ -837,7 +838,9 @@ return function(mod)
     if cached then
       registerImprovedId(improvedId, cached)
       extraDefs[improvedId] = cached.extra
-      return rememberVariant(nativeId, candidate, cached, improvedId, enabled)
+      local record = rememberVariant(nativeId, candidate, cached, improvedId, enabled)
+      if record then record.cachePath = path end
+      return record
     end
     return nil
   end
@@ -1182,7 +1185,7 @@ return function(mod)
                 if path then indexGeneratedCachePath(path) end
                 extraDefs[record.id] = record.extra
               else
-                local key = tostring(id) .. "|" .. variantKeyFor(candidate, enabled)
+                local key = tostring(id) .. "|" .. variantKeyFor(id, candidate, enabled)
                 if not queuedVariant[key] then
                   queuedVariant[key] = true
                   queue[#queue + 1] = {
@@ -1320,6 +1323,7 @@ return function(mod)
     registerImprovedId(entry.improvedId, translated)
     local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId, enabled)
     writeCached(entry.improvedId, translated)
+    if record then record.cachePath = resolveCachePath(entry.improvedId) end
     return record
   end
 
@@ -1788,14 +1792,21 @@ return function(mod)
           end
           return (not a.improved) and b.improved or false
         end)
+        local seenContent = {}
         for _, record in ipairs(records) do
-          variants[#variants + 1] = {
-            candidate = record.candidate,
-            improved = record.improved,
-            generation = record.generation,
-            version = record.version,
-            id = record.id,
-          }
+          local contentKey = record.cachePath or record.id
+          if contentKey and seenContent[contentKey] then
+            -- Skip an identical translation already represented by another version.
+          else
+            if contentKey then seenContent[contentKey] = true end
+            variants[#variants + 1] = {
+              candidate = record.candidate,
+              improved = record.improved,
+              generation = record.generation,
+              version = record.version,
+              id = record.id,
+            }
+          end
         end
         add({
           name = group.name or versions.pretty(label),

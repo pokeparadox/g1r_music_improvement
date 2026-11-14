@@ -100,9 +100,19 @@ while generatedChannel:nextEvent() do end
 T.eq(generatedChannel.timeTicks, 28 * 0x100,
   "Gen2 note lengths control generated timing")
 local _, cache = require("src.mods.ImportAccess").new(musicMod.manifest, run.loader.fs)
-local path = "songs/gold_" .. tostring(musicMod.manifest.version)
-  .. "_true_" .. songId .. ".lua"
-local bytes = cache and cache:read(path)
+local aliasBytes = cache and cache:read("songs/aliases.lua")
+local path
+if type(aliasBytes) == "string" then
+  local chunk = load(aliasBytes)
+  if chunk then
+    local ok, aliases = pcall(chunk)
+    if ok and type(aliases) == "table" then
+      path = aliases["Music_ImprovedGen2LiveData"]
+        or aliases[songId]
+    end
+  end
+end
+local bytes = path and cache and cache:read(path)
 T.check(type(bytes) == "string", "Gen2 live dataset writes its song cache")
 local chunk = type(bytes) == "string" and load(bytes)
 local cached = chunk and chunk()

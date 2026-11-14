@@ -20,8 +20,7 @@ function M.install(deps)
   local originalStopped = Audio.isBgmStopped
   local originalUpdate = Audio.update
   local originalStopAll = Audio.stopAll
-  local chip = { id = nil, nativeId = nil, record = nil, paused = false,
-                 extraPending = nil }
+  local chip = { id = nil, nativeId = nil, record = nil, paused = false }
   local pending = nil   -- { nativeId, id, settings, candidate }
   local lastPick = {}
   local chosen = {}     -- nativeId -> { source=..., candidate=... }
@@ -53,7 +52,6 @@ function M.install(deps)
     Audio._fadeOut, Audio._fadeIn = nil, nil
     Audio._currentSong = nil
     chip.id, chip.nativeId, chip.record, chip.paused = nil, nil, nil, false
-    chip.extraPending = nil
   end
 
   local function candidateFor(nativeId, settings)
@@ -106,9 +104,11 @@ function M.install(deps)
       Audio._bgmGen = nil
       return false
     end
-    pcall(source.setVolume, source, (tonumber(Audio._bgmVolume) or 1) * 0.3)
+    pcall(source.setVolume, source, (tonumber(Audio._bgmVolume) or 1) * 0.45)
     pcall(deps.extraAudio.stop)
-    chip.extraPending = record.extra
+    if record.extra then
+      pcall(deps.extraAudio.start, record.extra, { audio = {} }, nil, true)
+    end
     if deps.toast then pcall(deps.toast, record) end
     return true
   end
@@ -285,16 +285,8 @@ function M.install(deps)
       local source = ChipAudio.currentSource()
       if source then
         pcall(source.setVolume, source, gain)
-        if chip.extraPending then
-          local okPlaying, playing = pcall(source.isPlaying, source)
-          if okPlaying and playing then
-            local extra = chip.extraPending
-            chip.extraPending = nil
-            pcall(deps.extraAudio.start, extra, { audio = {} },
-              os.clock(), true)
-          end
-        end
       end
+      pcall(deps.extraAudio.update)
       pcall(deps.extraAudio.setMusicVolume, gain)
       pcall(deps.extraAudio.setBaseVolume, gain)
     elseif pending then
