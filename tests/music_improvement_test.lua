@@ -343,18 +343,23 @@ T.eq(gen2HeaderSeen and gen2HeaderSeen.engine, "gen2",
   "Gen2 engine selector reaches ChipSynth")
 T.eq(gen1HeaderSeen and gen1HeaderSeen.engine, "gen1",
   "Gen1 engine selector reaches ChipSynth")
-local gen2CachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
-  and musicMod.manifest.version or "0")
-  .. "_true_Music_Gen2CacheTest.lua"
+local function aliasPath(id)
+  local aliasBytes = cache and cache:read("songs/aliases.lua")
+  if type(aliasBytes) ~= "string" then return nil end
+  local chunk = load(aliasBytes)
+  if not chunk then return nil end
+  local ok, aliases = pcall(chunk)
+  if not ok or type(aliases) ~= "table" then return nil end
+  return aliases[id]
+end
+local gen2CachePath = aliasPath(gen2SongId)
 local gen2Bytes = cache and cache:read(gen2CachePath)
 local gen2Cached
 if type(gen2Bytes) == "string" then
   local chunk = load(gen2Bytes)
   if chunk then gen2Cached = chunk() end
 end
-local gen1CachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
-  and musicMod.manifest.version or "0")
-  .. "_true_" .. gen1SongId .. ".lua"
+local gen1CachePath = aliasPath(gen1SongId)
 local gen1Bytes = cache and cache:read(gen1CachePath)
 local gen1Cached
 if type(gen1Bytes) == "string" then
@@ -371,9 +376,7 @@ T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
 T.eq(gen2Cached and gen2Cached.extra and gen2Cached.extra.left
     and gen2Cached.extra.left.generation, 1,
   "generated harmony cache is pinned to the Gen1 decoder")
-local crossCachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
-  and musicMod.manifest.version or "0")
-  .. "_true_" .. crossSongId .. ".lua"
+local crossCachePath = aliasPath(crossSongId)
 local crossBytes = cache and cache:read(crossCachePath)
 local crossCached
 if type(crossBytes) == "string" then
@@ -395,9 +398,7 @@ T.check(crossRegisters[2] ~= nil and crossRegisters[2] ~= crossRegisters[1],
   "cross-song loop target continues decoding the foreign stream")
 T.eq(crossRegisters[3], crossRegisters[2],
   "cross-song loop points at the continuation instead of the intro")
-local noLoopCachePath = "songs/gold_" .. tostring(musicMod and musicMod.manifest
-  and musicMod.manifest.version or "0")
-  .. "_true_" .. noLoopSongId .. ".lua"
+local noLoopCachePath = aliasPath(noLoopSongId)
 local noLoopBytes = cache and cache:read(noLoopCachePath)
 local noLoopCached
 if type(noLoopBytes) == "string" then
@@ -498,18 +499,15 @@ if cache and exports and type(cache.delete) == "function" then
   logRemoval = false
 
   local keptIndex = true
-  local onlyOwnedCache = true
+  local onlySongCache = true
   for _, path in ipairs(deleted) do
     local rel = path:match("^mod_cache/[^/]+/(.*)$") or path
     if rel == "songs/index.txt" then keptIndex = false end
-    local ownBase = rel:sub(1, 11) == "songs/gold_"
-    local sharedVariant = rel:find("_Music_Improved", 1, true)
-      or rel:find("_Music_Stock", 1, true)
-    if not ownBase and not sharedVariant then onlyOwnedCache = false end
+    if rel:sub(1, 6) ~= "songs/" then onlySongCache = false end
   end
   T.check(keptIndex, "regeneration keeps the shared cache index")
   T.check(#deleted > 0, "regeneration deletes cached songs through mod.cache")
-  T.check(onlyOwnedCache, "regeneration only deletes own base and shared variant caches")
+  T.check(onlySongCache, "regeneration only deletes song cache files")
   local deletedForeign = false
   for _, path in ipairs(deleted) do
     local rel = path:match("^mod_cache/[^/]+/(.*)$") or path

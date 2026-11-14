@@ -689,17 +689,24 @@ return function(mod)
 
   local activeCacheGame = cacheGameId(nil)
 
-  local function safeCacheId(id)
-    return tostring(id):gsub("[^%w_]", "_")
+  local cacheAliases = {}
+
+  local function contentHash(bytes)
+    local h = 5381
+    for i = 1, #bytes do
+      h = (h * 33 + bytes:byte(i)) % 4294967296
+    end
+    return string.format("%08x", h)
   end
 
-  local function cachePath(id, hash)
-    return "songs/" .. activeCacheGame .. "_" .. hash .. "_" .. safeCacheId(id) .. ".lua"
+  local function contentCachePath(bytes)
+    local version = tostring(mod.manifest.version or "0")
+    local h = contentHash(bytes .. version)
+    return "songs/c_" .. version .. "_" .. h .. "_" .. tostring(#bytes) .. ".lua"
   end
 
-  local function variantCachePath(id, version, hash)
-    local safeVersion = tostring(version or "unknown"):gsub("[^%w_]", "_")
-    return "songs/v_" .. safeVersion .. "_" .. hash .. "_" .. safeCacheId(id) .. ".lua"
+  local function resolveCachePath(id)
+    return cacheAliases[id]
   end
 
   -- A dataset view is a detached, data-only copy.  Build the same synthetic
@@ -825,8 +832,8 @@ return function(mod)
     local existing = variantByKey[key]
     if existing and existing.def then return existing end
     local improvedId = variantIdFor(nativeId, candidate.version, enabled)
-    local cached = loadCached(variantCachePath(improvedId, candidate.version,
-      settingsHash(s)))
+    local path = resolveCachePath(improvedId)
+    local cached = path and loadCached(path)
     if cached then
       registerImprovedId(improvedId, cached)
       extraDefs[improvedId] = cached.extra
@@ -998,17 +1005,11 @@ return function(mod)
     -- (variants now live in the shared v_<source>_ namespace).  If the
     -- filesystem cannot delete (headless test overlays), keep the entries and
     -- stop trying; playback ignores files whose hash does not match.
-    local marker = "_" .. tostring(mod.manifest.version or "0") .. "_"
     local kept = {}
     local pruneOk = true
     for _, path in ipairs(paths) do
-      local keep = path:find(marker, 1, true) ~= nil
-      local host = path:match("^songs/(%a+)_")
-      if keep and host and host ~= "v"
-          and (path:find("_Music_Improved", 1, true)
-            or path:find("_Music_Stock", 1, true)) then
-        keep = false
-      end
+      local keep = path == "songs/aliases.lua"
+        or path:match("^songs/c_[%w%.]+_[0-9a-f]+_[0-9]+%.lua$") ~= nil
       if keep then
         kept[#kept + 1] = path
       elseif pruneOk then
@@ -1030,6 +1031,20 @@ return function(mod)
   end
 
   migrateCacheIndex()
+
+  do
+    local aliasPath = "songs/aliases.lua"
+    if cacheFileExists(aliasPath) then
+      local ok, bytes = pcall(mod.cache.read, mod.cache, aliasPath)
+      if ok and type(bytes) == "string" then
+        local fn = load(bytes)
+        if fn then
+          local okRun, result = pcall(fn)
+          if okRun and type(result) == "table" then cacheAliases = result end
+        end
+      end
+    end
+  end
 
   loadCached = function(path)
     local bytes = mod.cache:read(path)
@@ -1137,11 +1152,13 @@ return function(mod)
           originalDefs[id] = def
           local cachedDef = nil
           if not force then
-            cachedDef = loadCached(cachePath(id, hash))
+            local path = resolveCachePath(id)
+            cachedDef = (not force and path) and loadCached(path) or nil
           end
           if settings.enabled ~= false then
             if cachedDef then
-              indexGeneratedCachePath(cachePath(id, hash))
+              local path = resolveCachePath(id)
+              if path then indexGeneratedCachePath(path) end
               local improvedId = registerImproved(id, cachedDef)
               stagedImprovedMap[id] = improvedId
               extraDefs[improvedId] = cachedDef.extra
@@ -1161,8 +1178,8 @@ return function(mod)
               local s2 = { enabled = enabled, source = settings.source }
               local record = loadVariant(id, candidate, s2)
               if record then
-                indexGeneratedCachePath(variantCachePath(record.id,
-                  candidate.version, hash))
+                local path = resolveCachePath(record.id)
+                if path then indexGeneratedCachePath(path) end
                 extraDefs[record.id] = record.extra
               else
                 local key = tostring(id) .. "|" .. variantKeyFor(candidate, enabled)
@@ -1214,24 +1231,14 @@ return function(mod)
     local indexedPaths = readCacheIndex()
     if not indexedPaths then return false end
 
-    -- Rebuild this host's base songs and all shared variants; keep other
-    -- hosts' base caches.
-    local hostPrefix = "songs/" .. activeCacheGame .. "_"
-    local kept = {}
     for _, path in ipairs(indexedPaths) do
-      local sharedVariant = path:find("_Music_Improved", 1, true)
-        or path:find("_Music_Stock", 1, true)
-      if sharedVariant or path:sub(1, #hostPrefix) == hostPrefix then
-        if not deleteCacheFile(path) then return false end
-      else
-        kept[#kept + 1] = path
-      end
+      if not deleteCacheFile(path) then return false end
     end
 
-    cacheIndexPaths, cacheIndexSet = kept, {}
-    for _, path in ipairs(kept) do cacheIndexSet[path] = true end
+    cacheAliases = {}
+    cacheIndexPaths, cacheIndexSet = {}, {}
     cacheIndexReady = true
-    if not writeCacheIndex(kept) then return false end
+    if not writeCacheIndex({}) then return false end
     mod.log:info("music_improvement: cleared generated song cache")
     return true
   end
@@ -1256,24 +1263,38 @@ return function(mod)
     if startPreparation then startPreparation(game) end
   end
 
-  local function writeCached(cacheId, def, version)
+  local function writeCached(cacheId, def)
     if not serialize then return end
     local okSer, bytes = pcall(serialize, def)
     if not okSer or type(bytes) ~= "string" then return end
-    local hash = settingsHash(settings)
-    local path = version and variantCachePath(cacheId, version, hash)
-      or cachePath(cacheId, hash)
-    if not indexGeneratedCachePath(path) then
-      mod.log:error("music_improvement: skipping unindexed cached file %s", path)
-      return
+    local path = contentCachePath(bytes)
+    if cacheFileExists(path) ~= true then
+      if not indexGeneratedCachePath(path) then
+        mod.log:error("music_improvement: skipping unindexed cached file %s", path)
+        return
+      end
+      local okWrite, result, writeErr = pcall(mod.cache.write, mod.cache, path, bytes)
+      if not okWrite or result == false then
+        mod.log:error("music_improvement: failed to write cached file %s%s", path,
+          okWrite and ": " .. tostring(writeErr) or ": " .. tostring(result))
+        return
+      elseif cacheFileExists(path) ~= true then
+        mod.log:error("music_improvement: cached file is missing after write: %s", path)
+        return
+      end
     end
-    local okWrite, result, writeErr = pcall(mod.cache.write, mod.cache, path, bytes)
-    if not okWrite or result == false then
-      mod.log:error("music_improvement: failed to write cached file %s%s", path,
-        okWrite and ": " .. tostring(writeErr) or ": " .. tostring(result))
-    elseif cacheFileExists(path) ~= true then
-      mod.log:error("music_improvement: cached file is missing after write: %s", path)
+    -- Alias this song id to the content-addressed file.
+    if cacheAliases[cacheId] ~= path then
+      cacheAliases[cacheId] = path
+      local aliasBytes = serialize(cacheAliases)
+      if type(aliasBytes) == "string" then
+        local aliasPath = "songs/aliases.lua"
+        if indexGeneratedCachePath(aliasPath) then
+          pcall(mod.cache.write, mod.cache, aliasPath, aliasBytes)
+        end
+      end
     end
+    return
   end
 
   local function prepareVariant(entry, s)
@@ -1298,7 +1319,7 @@ return function(mod)
     extraDefs[entry.improvedId] = translated.extra
     registerImprovedId(entry.improvedId, translated)
     local record = rememberVariant(entry.nativeId, entry, translated, entry.improvedId, enabled)
-    writeCached(entry.improvedId, translated, entry.version)
+    writeCached(entry.improvedId, translated)
     return record
   end
 
@@ -1484,6 +1505,7 @@ return function(mod)
           require("src.core.Music").stop()
         end,
         footer = "LEFT/RIGHT VERSION\nSELECT IMP/STK",
+        rows = 6,
       })
       local baseUpdate = menu.update
       menu.update = function(self, dt)
