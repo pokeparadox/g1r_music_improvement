@@ -28,6 +28,7 @@ function M.openList(game, opts)
     onCycle = opts.onCycle,
     onSelect = opts.onSelect,
     stayOpen = opts.stayOpen,
+    hint = opts.hint,
   }
   local F = font()
 
@@ -74,6 +75,14 @@ function M.openList(game, opts)
       drawText((selected and "> " or "  ") .. tostring(item.label or item), 8, y, colors)
       if item.right then
         drawText(item.right, G.getWidth() - 8 - textWidth(item.right), y)
+      end
+    end
+    if menu.hint then
+      local lines = type(menu.hint) == "table" and menu.hint or { menu.hint }
+      local y = G.getHeight() - 6 - (#lines - 1) * 10
+      for _, line in ipairs(lines) do
+        drawText(line, 8, y)
+        y = y + 10
       end
     end
     G.pop()

@@ -1403,6 +1403,7 @@ return function(mod)
         onCancel = function()
           require("src.core.Music").stop()
         end,
+        footer = "LEFT/RIGHT VERSION\nSELECT IMP/STK",
       })
       local baseUpdate = menu.update
       menu.update = function(self, dt)
@@ -1767,6 +1768,7 @@ return function(mod)
       title = musicMenu.title(musicTestImproved),
       items = items,
       stayOpen = true,
+      hint = { "LEFT/RIGHT VERSION", "SELECT IMP/STK  A PLAY  B BACK" },
       onChoose = function(item) musicTestPlay(game, item) end,
       onCycle = function(item, dir)
         local variant = musicMenu.cycle(item.entry, item.versionKey, dir,
