@@ -1416,8 +1416,9 @@ return function(mod)
           return mod.options:get("enabled") ~= false and "ON" or "OFF"
         end,
         activate = function(g)
+          local game = (type(g) == "table" and g.game) or g or readyGame
           local cur = mod.options:get("enabled") ~= false
-          setModOption(g, "enabled", not cur)
+          setModOption(game, "enabled", not cur)
         end,
       },
 
@@ -1432,7 +1433,12 @@ return function(mod)
           return "OPEN"
         end,
         activate = function(g)
-          mod.ui.push(g, "MusicImprovementJukebox")
+          local game = (type(g) == "table" and g.game) or g or readyGame
+          if hostIsGen3(game) then
+            openGen3Jukebox(game)
+          else
+            mod.ui.push(g, "MusicImprovementJukebox")
+          end
         end,
       },
 
@@ -1446,7 +1452,7 @@ return function(mod)
           end
           return "PRESS A"
         end,
-        activate = function(g) regenerateCache(g) end,
+        activate = function(g) regenerateCache((type(g) == "table" and g.game) or g) end,
       },
 
       {
@@ -1541,6 +1547,100 @@ return function(mod)
         state.progressInstance.total = total
       end
     end
+  end
+
+  -- Gen3 has no game.stack; its option rows and startup prompt go through
+  -- gen3_ui.lua (the game3 modal stack) instead of mod.ui.push.
+  local gen3UiModule
+  local function gen3Ui()
+    if gen3UiModule == nil then
+      gen3UiModule = loadModFile("gen3_ui.lua") or false
+    end
+    return gen3UiModule or nil
+  end
+
+  local function hostIsGen3(game)
+    if not (okGameVersion and GameVersion and GameVersion.generation) then
+      return false
+    end
+    local ok, generation = pcall(GameVersion.generation,
+      cacheGameId(game or readyGame))
+    return ok and generation == 3
+  end
+
+  local function gen3SongIds(game)
+    local ids = {}
+    local okSong, Song = pcall(require, "src.core.game3.song_ids")
+    if not okSong or type(Song) ~= "table" or not Song.forVersion then
+      return ids
+    end
+    local okSongs, songs = pcall(Song.forVersion,
+      cacheGameId(game or readyGame))
+    if not okSongs or type(songs) ~= "table" then return ids end
+    for label in pairs(songs) do
+      if tostring(label):match("^MUS_") and versions.byLabel[label] then
+        ids[#ids + 1] = label
+      end
+    end
+    table.sort(ids)
+    return ids
+  end
+
+  local gen3Audio
+  local function audio3()
+    if gen3Audio == nil then
+      local ok, module = pcall(require, "src.core.game3.audio")
+      gen3Audio = (ok and type(module) == "table") and module or false
+    end
+    return gen3Audio or nil
+  end
+
+  local function openGen3Jukebox(game)
+    local ui = gen3Ui()
+    if not ui then return false end
+    local items = {}
+    for _, id in ipairs(gen3SongIds(game)) do
+      items[#items + 1] = { label = id:gsub("^MUS_", ""), value = id }
+    end
+    if #items == 0 then
+      items[1] = { label = "(NO SONGS)", value = nil }
+    end
+    return ui.openList(game, {
+      title = "MUSIC TEST",
+      items = items,
+      onChoose = function(item)
+        if not item.value then return end
+        local A = audio3()
+        if A and A.playSong then pcall(A.playSong, item.value) end
+      end,
+      onCancel = function()
+        local A = audio3()
+        if A and A.stopAll then pcall(A.stopAll) end
+      end,
+    })
+  end
+
+  local function openGen3Confirm(game)
+    local ui = gen3Ui()
+    if not ui then return false end
+    return ui.openList(game, {
+      title = "ENHANCE MUSIC?",
+      items = { { label = "YES", value = true }, { label = "NO", value = false } },
+      onChoose = function(item)
+        if item.value then
+          state.confirmed = true
+          setModOption(game, "enabled", true)
+          if game and game.stack and #queue > 0 then startPreparation(game) end
+        else
+          state.skipped = true
+          state.pending = false
+        end
+      end,
+      onCancel = function()
+        state.skipped = true
+        state.pending = false
+      end,
+    })
   end
 
   -- Prepare harmony while the threaded base source buffers, so both start
@@ -1737,9 +1837,14 @@ return function(mod)
     game.update = function(self, dt)
       pcall(applyChannelMix)
       if state.pending and not state.confirmed and not state.skipped
-          and not state.confirmPushed and self.stack then
-        state.confirmPushed = true
-        state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
+          and not state.confirmPushed then
+        if self.stack then
+          state.confirmPushed = true
+          state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
+        elseif hostIsGen3(self) then
+          state.confirmPushed = true
+          openGen3Confirm(self)
+        end
       end
       local result = nextUpdate(self, dt)
       if state.pending and (state.skipped or not state.progressInstance) then prepareOne(self) end
