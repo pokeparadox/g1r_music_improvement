@@ -1402,6 +1402,10 @@ return function(mod)
     end,
   })
 
+  -- Forward declarations: rows hook is registered before the gen3 helpers
+  -- below are defined, but its closures run later.
+  local hostIsGen3, openGen3Jukebox
+
   mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     local out = next(game, rows)
     if type(out) ~= "table" then return out end
@@ -1466,14 +1470,15 @@ return function(mod)
             gen1 = "GEN 1", gen2 = "GEN 2" })[source] or "NATIVE"
         end,
         activate = function(g)
+          local game = (type(g) == "table" and g.game) or g or readyGame
           local modes = { "native", "shuffle_all", "shuffle_improved",
             "shuffle_stock", "gen1", "gen2" }
           local cur = mod.options:get("source") or "shuffle_all"
           local index = 1
           for i, mode in ipairs(modes) do if mode == cur then index = i break end end
-          setModOption(g, "source", modes[index % #modes + 1])
-          buildQueue(currentSettings(), false, readyGame or g)
-          startPreparation(readyGame or g)
+          setModOption(game, "source", modes[index % #modes + 1])
+          buildQueue(currentSettings(), false, game)
+          startPreparation(game)
         end,
       },
     }
@@ -1559,7 +1564,7 @@ return function(mod)
     return gen3UiModule or nil
   end
 
-  local function hostIsGen3(game)
+  hostIsGen3 = function(game)
     if not (okGameVersion and GameVersion and GameVersion.generation) then
       return false
     end
@@ -1595,7 +1600,7 @@ return function(mod)
     return gen3Audio or nil
   end
 
-  local function openGen3Jukebox(game)
+  openGen3Jukebox = function(game)
     local ui = gen3Ui()
     if not ui then return false end
     local items = {}
