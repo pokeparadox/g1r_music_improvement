@@ -45,13 +45,17 @@ function M.select(entry, versionKey, improved)
     if M.versionKey(variant) == versionKey then
       if variant.native then
         nativeVariant = nativeVariant or variant
-      elseif variant.improved == improved then
+      end
+      if (not variant.native) and variant.improved == improved then
         return variant
-      else
+      elseif variant.native and improved == false then
+        return variant
+      elseif not variant.native then
         fallback = fallback or variant
       end
     end
   end
+  if improved == false and nativeVariant then return nativeVariant end
   if fallback then return fallback end
   return nativeVariant
 end

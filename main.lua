@@ -1766,6 +1766,22 @@ return function(mod)
       hostGen = GameVersion.generation(hostVersion) or hostGen
     end
     local entries, seen = {}, {}
+    local function baseImprovedVariant(id, generation)
+      local baseId = improvedIdFor(id)
+      local songs = game and game.data and game.data.audio
+        and game.data.audio.songs
+      if improvedMap[id] == baseId
+          or stagedImprovedMap[id] == baseId
+          or (type(songs) == "table" and songs[baseId] ~= nil) then
+        return {
+          id = baseId,
+          improved = true,
+          generation = generation,
+          base = true,
+        }
+      end
+      return nil
+    end
     local function add(entry)
       if seen[entry.nativeId] then return end
       seen[entry.nativeId] = true
@@ -1781,7 +1797,9 @@ return function(mod)
         end
       end
       if label and allowed then
-        local variants = { { native = true, generation = hostGen } }
+        local variants = { { native = true, generation = hostGen, improved = false } }
+        local base = baseImprovedVariant(label, hostGen)
+        if base then variants[#variants + 1] = base end
         local records = {}
         for _, record in ipairs(variantMap[label] or {}) do
           records[#records + 1] = record
@@ -1823,10 +1841,13 @@ return function(mod)
       if not versions.byLabel[id]
           and not tostring(id):match("^Music_Improved")
           and not tostring(id):match("^Music_Stock") then
+        local variants = { { native = true, generation = hostGen, improved = false } }
+        local base = baseImprovedVariant(id, hostGen)
+        if base then variants[#variants + 1] = base end
         add({
           name = versions.pretty(id),
           nativeId = id,
-          variants = { { native = true, generation = hostGen } },
+          variants = variants,
         })
       end
     end
