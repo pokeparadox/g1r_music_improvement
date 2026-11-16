@@ -26,6 +26,11 @@ local HARMONY_HW = 3
 local HARMONY_WAVE_LEVEL = 2 -- lower volume than the lead voicing
 local HARMONY_WAVE_INSTRUMENT = 1
 
+local MAJOR_SCALE = { 0, 2, 4, 5, 7, 9, 11 }
+local MINOR_SCALE = { 0, 2, 3, 5, 7, 8, 10 }
+local MAJOR_PROFILE = { 6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88 }
+local MINOR_PROFILE = { 6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17 }
+
 local function cloneEvent(event)
   local copy = {}
   for key, value in pairs(event) do
@@ -68,6 +73,50 @@ local function notePitchClass(event)
   return NOTES[name]
 end
 
+local function eventLength(event)
+  local len = tonumber(event.len)
+  if len and len > 0 then return len end
+  if type(event.rest) == "number" and event.rest > 0 then return event.rest end
+  if type(event.drum) == "number" then return tonumber(event.len) or 1 end
+  if type(event.noiseNote) == "table" then
+    return tonumber(event.noiseNote.len) or 1
+  end
+  if type(event.squareNote) == "table" then
+    return tonumber(event.squareNote.len) or 1
+  end
+  return 1
+end
+
+local function profileScore(hist, profile, tonic)
+  local score = 0
+  for i = 0, 11 do
+    score = score + (hist[((i - tonic) % 12) + 1] or 0) * profile[i + 1]
+  end
+  return score
+end
+
+local function scaleIndexFor(pc, key)
+  local rel = (pc - key.tonic) % 12
+  local bestIdx, bestDist = 1, 99
+  for i, deg in ipairs(key.scale) do
+    local dist = math.abs(rel - deg)
+    if dist > 6 then dist = 12 - dist end
+    if dist < bestDist then bestDist, bestIdx = dist, i end
+  end
+  return bestIdx
+end
+
+local function diatonicSemitoneDelta(sourcePc, key, degreeOffset)
+  if not key then return degreeOffset >= 0 and 4 or -3 end
+  local idx = scaleIndexFor(sourcePc, key)
+  local scale = key.scale
+  local targetIdx = ((idx - 1 + degreeOffset) % #scale) + 1
+  local octShift = math.floor((idx - 1 + degreeOffset) / #scale)
+  local sourceDeg = scale[idx]
+  local targetDeg = scale[targetIdx]
+  return (targetDeg - sourceDeg) + octShift * 12
+end
+
 local function settingsOf(settings)
   settings = type(settings) == "table" and settings or {}
   local function bool(key, alt)
@@ -78,6 +127,7 @@ local function settingsOf(settings)
   return {
     enabled = bool("enabled"),
     extraVolume = tonumber(settings.extraVolume or settings.extra_volume) or 1.0,
+    keyAware = settings.keyAware ~= false and settings.key_aware ~= false,
   }
 end
 
@@ -118,7 +168,16 @@ for name, pc in pairs(NOTES) do
   if not NOTES_REV[pc] then NOTES_REV[pc] = name end
 end
 
-local function transposeProgram(program, semitones)
+local function resolveInterval(interval, pc, key)
+  if type(interval) == "table" and interval.diatonic then
+    local delta = diatonicSemitoneDelta(pc, key, interval.degree or 2)
+    local shift = tonumber(interval.octaveShift) or 0
+    return delta + shift * 12
+  end
+  return tonumber(interval) or 0
+end
+
+local function transposeProgram(program, interval, key)
   local out = {}
   local indexMap = {}
   local loopTargets = {}
@@ -135,7 +194,8 @@ local function transposeProgram(program, semitones)
         out[#out+1] = cloneEvent(event)
       else
         local evOct = event.octave or octave
-        local absolute = (evOct - 1) * 12 + pc + (semitones or 0)
+        local semitones = resolveInterval(interval, pc, key)
+        local absolute = (evOct - 1) * 12 + pc + semitones
         local newOct = math.floor(absolute / 12) + 1
         local newPc = absolute % 12
         if newOct < 1 then newOct = 1 end
@@ -211,19 +271,73 @@ local function bassProgram(spec)
   return leadProgram(spec)
 end
 
-local function voiceSpec(program, semitones, volume, duty, subroutines)
+local function detectKey(spec)
+  local hist = {}
+  for i = 1, 12 do hist[i] = 0 end
+  local total, distinct = 0, 0
+  local function scanProgram(program)
+    local octave = 4
+    for _, event in ipairs(program or {}) do
+      local kind = eventKind(event)
+      if kind == "octave" then
+        octave = event.octave or octave
+      elseif kind == "note" or kind == "pitch" then
+        local pc = notePitchClass(event)
+        if pc ~= nil then
+          local w = eventLength(event)
+          hist[pc + 1] = hist[pc + 1] + w
+          total = total + w
+        end
+        if event.octave then octave = event.octave end
+      end
+    end
+  end
+  local lead = leadProgram(spec)
+  if lead then
+    scanProgram(lead)
+  else
+    for _, channel in ipairs(spec.channels or {}) do
+      if channel.hw ~= 4 and channel.program then scanProgram(channel.program) end
+    end
+  end
+  if total <= 0 then return nil end
+  for i = 1, 12 do if hist[i] > 0 then distinct = distinct + 1 end end
+  if distinct < 3 then return nil end
+  local best, second, bestMode, bestTonic = -1 / 0, -1 / 0, nil, nil
+  for tonic = 0, 11 do
+    local maj = profileScore(hist, MAJOR_PROFILE, tonic)
+    local min = profileScore(hist, MINOR_PROFILE, tonic)
+    local score, mode = maj, "major"
+    if min > maj then score, mode = min, "minor" end
+    if score > best then
+      second, best, bestMode, bestTonic = best, score, mode, tonic
+    elseif score > second then
+      second = score
+    end
+  end
+  local confidence = best > 0 and (best - second) / best or 0
+  if confidence < 0.03 then return nil end
+  return {
+    tonic = bestTonic,
+    mode = bestMode,
+    scale = (bestMode == "minor") and MINOR_SCALE or MAJOR_SCALE,
+    confidence = confidence,
+  }
+end
+
+local function voiceSpec(program, interval, volume, duty, subroutines, key)
   local subs = nil
   if type(subroutines) == "table" then
     subs = {}
     for name, sub in pairs(subroutines) do
-      subs[name] = transposeProgram(sub, semitones)
+      subs[name] = transposeProgram(sub, interval, key)
     end
   end
   return {
     hw = 1,
     subroutines = subs,
     program = (function()
-      local base = transposeProgram(program, semitones)
+      local base = transposeProgram(program, interval, key)
       -- ensure quiet instrument: inject notetype at start if missing
       local hasNoteType = false
       for _, ev in ipairs(base) do
@@ -265,15 +379,25 @@ local function extra(source, settings)
   local volume = math.max(1, math.min(12, math.floor((settings.extraVolume or 1.0) * 12)))
   local tempo = spec.tempo or 0x100
   local fast = tempo < 224
+  local key = settings.keyAware ~= false and detectKey(spec) or nil
   local out = {}
-  local function add(side, interval, duty)
-    out[side] = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs) } }
+  local function add(side, interval, duty, voiceKey)
+    out[side] = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs, voiceKey) } }
   end
-  add("left", 12, 1)
-  add("right", -12, 1)
-  -- Add the fifth only for non-fast songs; this keeps fast arrangements clean.
-  if not fast then
-    add("center", 7, 2)
+  if key then
+    add("left", { diatonic = true, degree = 2 }, 1, key)
+    add("right", { diatonic = true, degree = -3 }, 1, key)
+    -- 6th above on slower tracks keeps harmony musical without cluttering fast ones.
+    if not fast then
+      add("center", { diatonic = true, degree = 5 }, 2, key)
+    end
+  else
+    add("left", 12, 1, nil)
+    add("right", -12, 1, nil)
+    -- Add the fifth only for non-fast songs; this keeps fast arrangements clean.
+    if not fast then
+      add("center", 7, 2, nil)
+    end
   end
   local bass = bassProgram(spec)
   if bass then
@@ -281,7 +405,7 @@ local function extra(source, settings)
     -- bassDown uses a helper with bass program instead of lead
     out.bassDown = { tempo = tempo,
       channels = { (function()
-        local base = transposeProgram(bass, -12)
+        local base = transposeProgram(bass, -12, nil)
         local hasNoteType = false
         for _, ev in ipairs(base) do if ev.notetype then hasNoteType = true break end end
         if not hasNoteType then
@@ -304,4 +428,4 @@ local function extra(source, settings)
   return out
 end
 
-return { improve = improve, extra = extra }
+return { improve = improve, extra = extra, detectKey = detectKey, diatonicSemitoneDelta = diatonicSemitoneDelta }
