@@ -348,9 +348,9 @@ return function(mod)
         end
       end
       decode()
+      local sourceTarget, loopTo = resolveLoop(program,
+        eventProgramIndices, channel, decode, id, hw, def.address)
       if #program > 0 then
-        local sourceTarget, loopTo = resolveLoop(program,
-          eventProgramIndices, channel, decode, id, hw, def.address)
         local srcChannel = { hw = hw, program = program }
         if sourceTarget then
           if not oneshot then program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } } end
@@ -450,9 +450,9 @@ return function(mod)
         end
       end
       decode()
+      local sourceTarget, loopTo = resolveLoop(program,
+        eventProgramIndices, channel, decode, id, hw, def.address)
       if #program > 0 then
-        local sourceTarget, loopTo = resolveLoop(program,
-          eventProgramIndices, channel, decode, id, hw, def.address)
         local srcChannel = { hw = hw, program = program }
         if sourceTarget then
           if not oneshot then program[#program + 1] = { loop = { count = 0, to = loopTo or 1 } } end

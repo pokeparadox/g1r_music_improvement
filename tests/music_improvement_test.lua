@@ -38,6 +38,13 @@ Data.audio.songs[noLoopSongId] = {
   bank = noLoopBank,
 }
 
+local loopFirstSongId = "Music_Gen2LoopFirstTest"
+local loopFirstAddress, loopFirstBank = 0x7FF6, 0x7B
+Data.audio.songs[loopFirstSongId] = {
+  address = loopFirstAddress,
+  bank = loopFirstBank,
+}
+
 local CoreData = require("src.core.Data")
 local previousAudio = CoreData.audio
 CoreData.audio = Data.audio
@@ -267,7 +274,94 @@ local function mockNoLoopEngine()
   engine.channels[2] = channel2
   return engine
 end
+local function mockLoopFirstEngine()
+  local engine = { tempo = 0x100, generation = 2, channels = {} }
+  local channel = {
+    engine = engine,
+    hardware = 1,
+    noteLength = 12,
+    volume = 8,
+    fade = 0,
+    timeTicks = 0,
+    ended = false,
+    address = 0x700,
+    eventIndex = 0,
+  }
+  local loopBytes = {
+    [0x702] = 0xFD, [0x703] = 0, [0x704] = 0x00, [0x705] = 0x09,
+  }
+  function channel:byte()
+    local value = loopBytes[self.address] or 0
+    self.address = self.address + 1
+    return value
+  end
+  function channel:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
+  function channel:frequency(note, octave)
+    return 1300 + note * 2 + octave
+  end
+  function channel:nextEvent()
+    self.eventIndex = self.eventIndex + 1
+    if self.eventIndex == 1 then
+      self.ended = true
+      self.address = 0x706
+      -- Tempo precedes the loop, so a loop-first channel must still own it.
+      engine.tempo = 0x80
+      return nil
+    end
+    if self.eventIndex == 2 then
+      self.address = 0x900
+      self.timeTicks = self.timeTicks + 12 * 0x80
+      return { register = 1300, volume = 8, fade = 0, duty = 1 }
+    end
+    self.ended = true
+    self.address = 0x902
+    return nil
+  end
+  engine.channels[1] = channel
+  local channel2 = {
+    engine = engine,
+    hardware = 2,
+    noteLength = 12,
+    volume = 8,
+    fade = 0,
+    timeTicks = 0,
+    ended = false,
+    address = 0x710,
+    eventIndex = 0,
+  }
+  function channel2:byte()
+    self.address = self.address + 1
+    return 0
+  end
+  function channel2:word()
+    local low, high = self:byte(), self:byte()
+    return low + high * 0x100
+  end
+  function channel2:frequency(note, octave)
+    return 1400 + note * 2 + octave
+  end
+  function channel2:nextEvent()
+    self.eventIndex = self.eventIndex + 1
+    if self.eventIndex == 1 then
+      self.address = 0x710
+      self.timeTicks = self.timeTicks + 12 * (engine.tempo or 0x100)
+      return { register = 1400, volume = 8, fade = 0, duty = 1 }
+    end
+    self.ended = true
+    self.address = 0x716
+    return nil
+  end
+  engine.channels[2] = channel2
+  return engine
+end
 ChipSynth.newEngine = function(data, header, options)
+  if type(header) == "table" and header.address == loopFirstAddress
+      and header.bank == loopFirstBank then
+    return mockLoopFirstEngine()
+  end
   if type(header) == "table" and header.address == crossAddress
       and header.bank == crossBank then
     return mockCrossLoopEngine()
@@ -438,6 +532,26 @@ if noLoopCached then
 end
 T.eq(noLoopFirstDurations[2], 12 * 0x100,
   "channel translation starts from the song tempo, not the previous channel")
+local loopFirstCachePath = aliasPath(loopFirstSongId)
+local loopFirstBytes = cache and cache:read(loopFirstCachePath)
+local loopFirstCached
+if type(loopFirstBytes) == "string" then
+  local chunk = load(loopFirstBytes)
+  if chunk then loopFirstCached = chunk() end
+end
+local loopFirstTiming = {}
+if loopFirstCached then
+  local loopFirstEngine = originalNewEngine(Data, loopFirstCached,
+    { allowLoops = false })
+  for index, channel in ipairs(loopFirstEngine.channels) do
+    local event = channel:nextEvent()
+    loopFirstTiming[index] = event and channel.timeTicks
+  end
+end
+T.eq(loopFirstTiming[1], 12 * 0x80,
+  "loop-first channel keeps the tempo declared before its source loop")
+T.eq(loopFirstTiming[2], 12 * 0x80,
+  "other channels decode against a tempo owned by a loop-first channel")
 local generatedDrum = gen1Cached and gen1Cached.chip
   and gen1Cached.chip.drums and gen1Cached.chip.drums[1]
 T.eq(generatedDrum and #generatedDrum, 2,
