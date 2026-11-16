@@ -30,7 +30,7 @@ M.EQUIVALENTS = {
 
   { gen1 = "Music_PalletTown", gen2 = "Music_PalletTown", gen3 = "MUS_PALLET",
     name = "Pallet Town" },
-  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_VIRIDIAN",
+  { gen1 = "Music_Cities1", gen2 = "Music_ViridianCity", gen3 = "MUS_PEWTER",
     name = "Viridian City" },
   { gen1 = "Music_TitleScreen", gen3 = "MUS_TITLE", hosts = { "firered", "leafgreen" },
       hostSources = { firered = { "red" }, leafgreen = { "blue" } },
