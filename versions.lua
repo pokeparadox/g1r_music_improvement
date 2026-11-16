@@ -66,6 +66,8 @@ M.EQUIVALENTS = {
     name = "Rival Encounter" },
   { gen1 = "Music_TrainerBattle", gen2 = "Music_RocketBattle",
     name = "Team Rocket Battle" },
+  { gen1 = "Music_MeetEvilTrainer", gen2 = "Music_LookRocket", gen3 = "MUS_ENCOUNTER_ROCKET",
+    name = "Team Rocket Encounter" },
   { gen1 = "Music_Dungeon1", gen2 = "Music_MtMoon", gen3 = "MUS_MT_MOON",
     name = "Mt. Moon" },
   { gen1 = "Music_Dungeon2", gen2 = "Music_UnionCave", name = "Union Cave" },
