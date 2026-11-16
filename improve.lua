@@ -117,6 +117,8 @@ local function diatonicSemitoneDelta(sourcePc, key, degreeOffset)
   return (targetDeg - sourceDeg) + octShift * 12
 end
 
+local TICKS_PER_SECOND = 15360
+
 local function settingsOf(settings)
   settings = type(settings) == "table" and settings or {}
   local function bool(key, alt)
@@ -128,7 +130,95 @@ local function settingsOf(settings)
     enabled = bool("enabled"),
     extraVolume = tonumber(settings.extraVolume or settings.extra_volume) or 1.0,
     keyAware = settings.keyAware ~= false and settings.key_aware ~= false,
+    dynamicIntensity = settings.dynamicIntensity ~= false and settings.dynamic_intensity ~= false,
   }
+end
+
+local function buildIntensityEnvelope(spec)
+  local tempo = spec.tempo or 0x100
+  local windowSec = 0.75
+  local function programWindows(program, baseTempo)
+    local windows = {}
+    local t, speed, curTempo = 0, 12, baseTempo or tempo
+    local w = 0
+    for _, event in ipairs(program or {}) do
+      local kind = eventKind(event)
+      if kind == "tempo" and type(event.tempo) == "number" then
+        curTempo = event.tempo
+      elseif kind == "notetype" and type(event.notetype) == "table" then
+        speed = tonumber(event.notetype.speed) or speed
+      elseif kind == "note" or kind == "pitch" then
+        local len = tonumber(event.len) or 1
+        local dur = (len * speed * curTempo) / TICKS_PER_SECOND
+        local idx = math.floor(t / windowSec) + 1
+        windows[idx] = (windows[idx] or 0) + 1
+        t = t + dur
+        if idx > w then w = idx end
+      elseif kind == "rest" then
+        local len = tonumber(event.rest) or 1
+        t = t + (len * speed * curTempo) / TICKS_PER_SECOND
+      elseif kind == "noiseNote" and type(event.noiseNote) == "table" then
+        local len = tonumber(event.noiseNote.len) or 1
+        t = t + (len * speed * curTempo) / TICKS_PER_SECOND
+      elseif kind == "squareNote" and type(event.squareNote) == "table" then
+        local len = tonumber(event.squareNote.len) or 1
+        t = t + (len * speed * curTempo) / TICKS_PER_SECOND
+      elseif kind == "drum" then
+        local len = tonumber(event.len) or 1
+        t = t + (len * speed * curTempo) / TICKS_PER_SECOND
+      end
+    end
+    return windows, math.max(w, math.floor(t / windowSec) + 1), t
+  end
+  local combined, totalWindows, maxT = {}, 0, 0
+  for _, channel in ipairs(spec.channels or {}) do
+    if channel.hw ~= 4 and channel.program then
+      local w, n, t = programWindows(channel.program, tempo)
+      if n > totalWindows then totalWindows = n end
+      if t > maxT then maxT = t end
+      for i = 1, n do combined[i] = (combined[i] or 0) + (w[i] or 0) end
+    end
+  end
+  if totalWindows <= 0 then
+    return { { t = 0, g = 1.0 } }, 1.0
+  end
+  local smoothed, maxD = {}, 0
+  for i = 1, totalWindows do
+    local sum, count = 0, 0
+    for j = math.max(1, i - 1), math.min(totalWindows, i + 1) do
+      sum = sum + (combined[j] or 0)
+      count = count + 1
+    end
+    local v = count > 0 and (sum / count) or 0
+    smoothed[i] = v
+    if v > maxD then maxD = v end
+  end
+  local envelope = {}
+  local peak = 0
+  for i = 1, totalWindows do
+    local norm = maxD > 0 and (smoothed[i] / maxD) or 0
+    local g
+    if norm < 0.22 then
+      g = 0.35
+    elseif norm < 0.55 then
+      g = 0.65
+    else
+      g = 1.0
+    end
+    envelope[#envelope + 1] = { t = (i - 1) * windowSec, g = g }
+    if g > peak then peak = g end
+  end
+  return envelope, peak
+end
+
+local function sampleEnvelope(envelope, t)
+  if type(envelope) ~= "table" or #envelope == 0 then return 1.0 end
+  local g = envelope[1].g or 1.0
+  for i = 1, #envelope do
+    local e = envelope[i]
+    if (e.t or 0) <= t then g = e.g or g else break end
+  end
+  return g
 end
 
 -- Improvement pass, settings-gated. Returns a clone (unchanged) when disabled.
@@ -380,30 +470,51 @@ local function extra(source, settings)
   local tempo = spec.tempo or 0x100
   local fast = tempo < 224
   local key = settings.keyAware ~= false and detectKey(spec) or nil
+  local dyn = settings.dynamicIntensity ~= false
+  local envelope = nil
+  if dyn then envelope = buildIntensityEnvelope(spec) end
   local out = {}
-  local function add(side, interval, duty, voiceKey)
-    out[side] = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs, voiceKey) } }
+  local function sideEnvelope(base, factor)
+    if not envelope then return nil end
+    local e = {}
+    for i, p in ipairs(envelope) do
+      local g = (p.g or 1.0) * (factor or 1.0)
+      if base == "center" then
+        -- bring center in only for active/climactic windows
+        if (p.g or 1.0) < 0.55 then g = 0 end
+      elseif base == "bassDown" then
+        g = math.max(0.25, (p.g or 1.0) * (factor or 1.0))
+      end
+      e[i] = { t = p.t, g = g }
+    end
+    return e
+  end
+  local function add(side, interval, duty, voiceKey, envFactor)
+    local s = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs, voiceKey) } }
+    local env = sideEnvelope(side, envFactor)
+    if env then s.intensityEnvelope = env end
+    out[side] = s
   end
   if key then
-    add("left", { diatonic = true, degree = 2 }, 1, key)
-    add("right", { diatonic = true, degree = -3 }, 1, key)
+    add("left", { diatonic = true, degree = 2 }, 1, key, 1.0)
+    add("right", { diatonic = true, degree = -3 }, 1, key, 0.95)
     -- 6th above on slower tracks keeps harmony musical without cluttering fast ones.
     if not fast then
-      add("center", { diatonic = true, degree = 5 }, 2, key)
+      add("center", { diatonic = true, degree = 5 }, 2, key, 0.9)
     end
   else
-    add("left", 12, 1, nil)
-    add("right", -12, 1, nil)
+    add("left", 12, 1, nil, 1.0)
+    add("right", -12, 1, nil, 0.95)
     -- Add the fifth only for non-fast songs; this keeps fast arrangements clean.
     if not fast then
-      add("center", 7, 2, nil)
+      add("center", 7, 2, nil, 0.9)
     end
   end
   local bass = bassProgram(spec)
   if bass then
     local bassVolume = math.max(1, math.floor(volume * 0.8))
     -- bassDown uses a helper with bass program instead of lead
-    out.bassDown = { tempo = tempo,
+    local bassSpec = { tempo = tempo,
       channels = { (function()
         local base = transposeProgram(bass, -12, nil)
         local hasNoteType = false
@@ -424,8 +535,18 @@ local function extra(source, settings)
         if not hasDuty then prependProgramEvent(base, { duty = 1 }) end
         return { hw = 1, program = base }
       end)() } }
+    local env = sideEnvelope("bassDown", 0.85)
+    if env then bassSpec.intensityEnvelope = env end
+    out.bassDown = bassSpec
   end
   return out
 end
 
-return { improve = improve, extra = extra, detectKey = detectKey, diatonicSemitoneDelta = diatonicSemitoneDelta }
+return {
+  improve = improve,
+  extra = extra,
+  detectKey = detectKey,
+  diatonicSemitoneDelta = diatonicSemitoneDelta,
+  buildIntensityEnvelope = buildIntensityEnvelope,
+  sampleEnvelope = sampleEnvelope,
+}

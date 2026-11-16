@@ -23,6 +23,7 @@ return function()
 
   local state = {
     engines = {},
+    envelopes = {},
     sideEnabled = { left = true, center = true, right = true },
     source = nil,
     extraGain = 0.35,
@@ -45,6 +46,22 @@ return function()
     givenUp = false,
   }
 
+  local function sampleEnvelope(envelope, t)
+    if type(envelope) ~= "table" or #envelope == 0 then return 1.0 end
+    local g = envelope[1].g
+    if g == nil then g = 1.0 end
+    for i = 1, #envelope do
+      local e = envelope[i]
+      if (e.t or 0) <= t then
+        g = e.g
+        if g == nil then g = 1.0 end
+      else
+        break
+      end
+    end
+    return g
+  end
+
   local function isPlaying(src)
     if not src then return false end
     local ok, playing = pcall(src.isPlaying, src)
@@ -55,6 +72,7 @@ return function()
     if state.source then pcall(state.source.stop, state.source) end
     state.source = nil
     state.engines = {}
+    state.envelopes = {}
     state.extraRendered = 0
     state.baseElapsed = 0
     state.baseLastClock = 0
@@ -116,16 +134,19 @@ return function()
     local rightMix = {}
     for i = 0, chunk - 1 do leftMix[i] = 0; rightMix[i] = 0 end
 
+    local chunkStart = state.extraRendered
     for side, engine in pairs(state.engines) do
-      if state.sideEnabled[side] == false then goto continue end
+      local env = state.envelopes and state.envelopes[side]
+      local dynGain = sampleEnvelope(env, chunkStart / SAMPLE_RATE)
+      if state.sideEnabled[side] == false then dynGain = 0 end
       local okSd, sd = pcall(ChipSynth.soundData, engine, chunk, 1)
-      if okSd and sd then
+      if okSd and sd and dynGain > 0 then
         local ptr = nil
         if ChipSynth._int16Pointer then
           local okPtr, p = pcall(ChipSynth._int16Pointer, sd)
           if okPtr then ptr = p end
         end
-        local gain = state.extraGain * state.musicVolume
+        local gain = state.extraGain * state.musicVolume * dynGain
         for i = 0, chunk - 1 do
           local sample = 0
           if ptr then
@@ -146,7 +167,6 @@ return function()
           end
         end
       end
-      ::continue::
     end
 
     local channels = state.channels or 2
@@ -268,11 +288,15 @@ return function()
     stop()
     if type(song) ~= "table" then return end
     state.data = data
+    state.envelopes = {}
     for side, sideSong in pairs(song) do
       if type(sideSong) == "table" and type(sideSong.chip) == "table" then
         local ok, engine = pcall(ChipSynth.newEngine, data, sideSong, { allowLoops = true })
         if ok and type(engine) == "table" then
           state.engines[side] = engine
+          if type(sideSong.intensityEnvelope) == "table" then
+            state.envelopes[side] = sideSong.intensityEnvelope
+          end
         end
       end
     end

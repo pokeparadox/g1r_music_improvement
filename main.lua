@@ -550,6 +550,9 @@ return function(mod)
           local okSong, song = pcall(ChipAsm.song, spec)
           if okSong and type(song) == "table" and type(song.chip) == "table" then
             song.generation = 1
+            if type(spec) == "table" and spec.intensityEnvelope then
+              song.intensityEnvelope = spec.intensityEnvelope
+            end
             extraSong[side] = song
           end
         end
