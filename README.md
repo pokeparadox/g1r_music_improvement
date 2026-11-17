@@ -35,6 +35,11 @@ These additional voices are mixed together with the original music to create a f
 Faster tracks automatically omit the fifth harmony to help keep busy arrangements clear.
 The added harmonies are applied as a stero mix with 80%/60% stereo bleed
 
+### 🧭 Guided Song Profiles
+Harmony choices are guided per song by researched key, mode and texture (see `docs/song_research.md`).
+Profiles only steer diatonic harmony pitches and voice density; the original melody, tempo and note data are never transposed.
+Songs without reliable research fall back to the automatic key detection and default harmony rules.
+
 ### 🎚️ Independent Harmony Mixing
 - Additional harmony audio is mixed independently of the original music.
 - Adjustable harmony volume allows the extra voices to be balanced against the original soundtrack.

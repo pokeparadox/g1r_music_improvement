@@ -49,9 +49,18 @@ return function(mod)
   if not improveModule then return end
   local versions = loadModFile("versions.lua")
   if not versions then return end
+  local profiles = loadModFile("song_profiles.lua")
+  if not profiles then return end
   local musicMenu = loadModFile("music_menu.lua")
   local improve = function(src, settings) return improveModule.improve(src, settings) end
-  local extraSpec = function(src, settings) return improveModule.extra(src, settings) end
+  local extraSpec = function(src, settings, id)
+    local profile = id and profiles.forLabel(id) or nil
+    if not profile then return improveModule.extra(src, settings) end
+    local copy = {}
+    for k, v in pairs(settings or {}) do copy[k] = v end
+    copy.profile = profile
+    return improveModule.extra(src, copy)
+  end
   local serialize = loadModFile("serialize.lua")
   local extraAudioFactory = loadModFile("extra_audio.lua")
   local extraAudio = extraAudioFactory and extraAudioFactory()
@@ -543,7 +552,7 @@ return function(mod)
       -- ChipAsm emits Gen1 bytecode; without this Gold would decode the
       -- generated blob with its Gen2 decoder and misread every command.
       translated.generation = 1
-      local extra = extraSpec(src, settings)
+      local extra = extraSpec(src, settings, id)
       if extra then
         local extraSong = {}
         for side, spec in pairs(extra) do

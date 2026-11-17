@@ -28,6 +28,14 @@ local HARMONY_WAVE_INSTRUMENT = 1
 
 local MAJOR_SCALE = { 0, 2, 4, 5, 7, 9, 11 }
 local MINOR_SCALE = { 0, 2, 3, 5, 7, 8, 10 }
+local MODE_SCALES = {
+  major = MAJOR_SCALE,
+  minor = MINOR_SCALE,
+  mixolydian = { 0, 2, 4, 5, 7, 9, 10 },
+  dorian = { 0, 2, 3, 5, 7, 9, 10 },
+  phrygian = { 0, 1, 3, 5, 7, 8, 10 },
+  lydian = { 0, 2, 4, 6, 7, 9, 11 },
+}
 local MAJOR_PROFILE = { 6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88 }
 local MINOR_PROFILE = { 6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17 }
 
@@ -131,6 +139,37 @@ local function settingsOf(settings)
     extraVolume = tonumber(settings.extraVolume or settings.extra_volume) or 1.0,
     keyAware = settings.keyAware ~= false and settings.key_aware ~= false,
     dynamicIntensity = settings.dynamicIntensity ~= false and settings.dynamic_intensity ~= false,
+    profile = type(settings.profile) == "table" and settings.profile or nil,
+  }
+end
+
+-- A researched song profile supplies the key directly. Only key/scale maths
+-- is steered here; the source song itself is never transposed.
+local function profileKey(profile)
+  if type(profile) ~= "table" or type(profile.key) ~= "table" then return nil end
+  local key = profile.key
+  local tonic = tonumber(key.tonic)
+  if not tonic or tonic < 0 or tonic > 11 or tonic ~= math.floor(tonic) then
+    return nil
+  end
+  local scale = key.scale
+  if type(scale) ~= "table" or #scale < 3 then
+    scale = MODE_SCALES[key.mode] or MAJOR_SCALE
+  end
+  local checked = {}
+  for _, degree in ipairs(scale) do
+    local value = tonumber(degree)
+    if not value or value < 0 or value > 11 or value ~= math.floor(value) then
+      return nil
+    end
+    checked[#checked + 1] = value
+  end
+  return {
+    tonic = tonic,
+    mode = key.mode or "major",
+    scale = checked,
+    confidence = 1,
+    source = key.source or profile.source or "profile",
   }
 end
 
@@ -469,8 +508,15 @@ local function extra(source, settings)
   local volume = math.max(1, math.min(12, math.floor((settings.extraVolume or 1.0) * 12)))
   local tempo = spec.tempo or 0x100
   local fast = tempo < 224
-  local key = settings.keyAware ~= false and detectKey(spec) or nil
-  local dyn = settings.dynamicIntensity ~= false
+  local profile = settings.profile
+  local key = nil
+  if settings.keyAware ~= false then
+    key = profileKey(profile) or detectKey(spec)
+  end
+  local dyn = settings.dynamicIntensity
+  if profile and profile.dynamicIntensity ~= nil then
+    dyn = profile.dynamicIntensity ~= false
+  end
   local envelope = nil
   if dyn then envelope = buildIntensityEnvelope(spec) end
   local out = {}
@@ -489,56 +535,81 @@ local function extra(source, settings)
     end
     return e
   end
-  local function add(side, interval, duty, voiceKey, envFactor)
-    local s = { tempo = tempo, channels = { voiceSpec(program, interval, volume, duty, subs, voiceKey) } }
-    local env = sideEnvelope(side, envFactor)
-    if env then s.intensityEnvelope = env end
-    out[side] = s
-  end
-  if key then
-    add("left", { diatonic = true, degree = 2 }, 1, key, 1.0)
-    add("right", { diatonic = true, degree = -3 }, 1, key, 0.95)
-    -- 6th above on slower tracks keeps harmony musical without cluttering fast ones.
-    if not fast then
-      add("center", { diatonic = true, degree = 5 }, 2, key, 0.9)
-    end
-  else
-    add("left", 12, 1, nil, 1.0)
-    add("right", -12, 1, nil, 0.95)
-    -- Add the fifth only for non-fast songs; this keeps fast arrangements clean.
-    if not fast then
-      add("center", 7, 2, nil, 0.9)
-    end
-  end
+
   local bass = bassProgram(spec)
-  if bass then
-    local bassVolume = math.max(1, math.floor(volume * 0.8))
-    -- bassDown uses a helper with bass program instead of lead
-    local bassSpec = { tempo = tempo,
-      channels = { (function()
-        local base = transposeProgram(bass, -12, nil)
-        local hasNoteType = false
-        for _, ev in ipairs(base) do if ev.notetype then hasNoteType = true break end end
-        if not hasNoteType then
-          prependProgramEvent(base, {
-            notetype = { speed = 12, volume = bassVolume, fade = 1 },
-          })
-        else
-          for _, ev in ipairs(base) do
-            if ev.notetype and ev.notetype.volume then
-              ev.notetype.volume = math.min(ev.notetype.volume, bassVolume)
-            end
-          end
-        end
-        local hasDuty = false
-        for _, ev in ipairs(base) do if ev.duty ~= nil then hasDuty = true break end end
-        if not hasDuty then prependProgramEvent(base, { duty = 1 }) end
-        return { hw = 1, program = base }
-      end)() } }
-    local env = sideEnvelope("bassDown", 0.85)
-    if env then bassSpec.intensityEnvelope = env end
-    out.bassDown = bassSpec
+  local defaults = {
+    left = { degree = 2, duty = 1, gain = 1.0 },
+    right = { degree = -3, duty = 1, gain = 0.95 },
+    center = { degree = 5, duty = 2, gain = 0.9 },
+    bassDown = { semitones = -12, duty = 1, gain = 0.85, program = bass },
+  }
+  local profileSides = type(profile) == "table" and type(profile.sides) == "table"
+    and profile.sides or nil
+
+  -- With no detected key, preserve the original octave/fifth fallbacks.
+  local function fallbackInterval(degree)
+    if degree < 0 then return -12 end
+    if degree > 3 then return 7 end
+    return 12
   end
+
+  local function addSide(name, base)
+    if name == "bassDown" and not base.program then return end
+    local override = profileSides and profileSides[name] or nil
+    if override and override.enabled == false then return end
+    if name == "center" and fast and not (override and override.enabled == true) then
+      return
+    end
+
+    local interval
+    local voiceKey = name == "bassDown" and nil or key
+    local shift = override and tonumber(override.octaveShift) or 0
+    if override and override.semitones ~= nil then
+      interval = (tonumber(override.semitones) or 0) + shift * 12
+      voiceKey = nil
+    elseif override and override.degree ~= nil then
+      local degree = tonumber(override.degree) or 0
+      if key then
+        interval = { diatonic = true, degree = degree }
+        if shift ~= 0 then interval.octaveShift = shift end
+        voiceKey = key
+      else
+        interval = fallbackInterval(degree) + shift * 12
+      end
+    elseif base.semitones ~= nil then
+      interval = base.semitones + shift * 12
+    elseif key then
+      interval = { diatonic = true, degree = base.degree }
+      if shift ~= 0 then interval.octaveShift = shift end
+    else
+      interval = fallbackInterval(base.degree) + shift * 12
+    end
+
+    local duty = base.duty
+    if override and override.duty ~= nil then duty = tonumber(override.duty) or duty end
+    local gainFactor = override and tonumber(override.gain) or 1
+    local voiceVolume = volume
+    if name == "bassDown" then
+      voiceVolume = math.max(1, math.min(12, math.floor(volume * 0.8 * gainFactor)))
+    elseif gainFactor ~= 1 then
+      voiceVolume = math.max(1, math.min(12, math.floor(volume * gainFactor)))
+    end
+    local envFactor = (base.gain or 1) * gainFactor
+
+    local prog = base.program or program
+    local sub = subs
+    if name == "bassDown" then sub = nil end
+    local s = { tempo = tempo,
+      channels = { voiceSpec(prog, interval, voiceVolume, duty, sub, voiceKey) } }
+    local env = sideEnvelope(name, envFactor)
+    if env then s.intensityEnvelope = env end
+    out[name] = s
+  end
+
+  addSide("left", defaults.left)
+  addSide("right", defaults.right)
+  addSide("center", defaults.center)
+  addSide("bassDown", defaults.bassDown)
   return out
 end
 
