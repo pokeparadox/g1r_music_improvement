@@ -496,6 +496,31 @@ local function voiceSpec(program, interval, volume, duty, subroutines, key)
   }
 end
 
+-- A side sourced from a non-lead channel carries no tempo commands; its own
+-- ChipSynth engine would stay at the header tempo forever. Mirror the lead
+-- tempo timeline on a silent channel so the engine's shared tempo register
+-- follows the same changes as the base song (including after a loop).
+local function tempoFollowerChannel(leadProgram)
+  local hasTempo = false
+  for _, event in ipairs(leadProgram or {}) do
+    if event.tempo ~= nil then hasTempo = true break end
+  end
+  if not hasTempo then return nil end
+  local program = {}
+  for _, event in ipairs(leadProgram or {}) do
+    if event.tempo ~= nil then
+      program[#program + 1] = { tempo = event.tempo }
+    elseif event.loop and type(event.loop.to) == "number" then
+      program[#program + 1] = cloneEvent(event)
+    elseif event.notetype ~= nil then
+      program[#program + 1] = cloneEvent(event)
+    else
+      program[#program + 1] = { rest = eventLength(event) }
+    end
+  end
+  return { hw = 2, program = program }
+end
+
 local function extra(source, settings)
   settings = settingsOf(settings)
   if not settings.enabled then return nil end
@@ -601,6 +626,14 @@ local function extra(source, settings)
     if name == "bassDown" then sub = nil end
     local s = { tempo = tempo,
       channels = { voiceSpec(prog, interval, voiceVolume, duty, sub, voiceKey) } }
+    if prog ~= program then
+      local follower = tempoFollowerChannel(program)
+      if follower and #follower.program > 0 then
+        -- Channel order matters: the follower must set engine.tempo before
+        -- the voice channel reads it for this step.
+        table.insert(s.channels, 1, follower)
+      end
+    end
     local env = sideEnvelope(name, envFactor)
     if env then s.intensityEnvelope = env end
     out[name] = s

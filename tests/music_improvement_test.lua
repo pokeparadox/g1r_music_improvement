@@ -51,6 +51,7 @@ CoreData.audio = Data.audio
 
 local ChipSynth = require("src.core.ChipSynth")
 local originalNewEngine = ChipSynth.newEngine
+local ChipAsm = require("src.audio.ChipAsm")
 local gen2HeaderSeen
 local gen1HeaderSeen
 local function mockEngine(includeNoise)
@@ -596,6 +597,46 @@ end
 T.eq(extraLoop and extraProgram[extraLoop.to]
     and extraProgram[extraLoop.to].octave, 6,
   "transposed harmony loops follow inserted octave and instrument events")
+
+-- A side built from a non-lead channel has no tempo events. Its separate
+-- engine must still follow the lead timeline through loop restarts.
+local tempoSource = {
+  tempo = 0x100,
+  channels = {
+    { hw = 1, program = {
+      { pitch = 0, len = 2 },
+      { tempo = 0x80 },
+      { pitch = 1, len = 2 },
+      { loop = { count = 0, to = 1 } },
+    } },
+    { hw = 2, program = {
+      { pitch = 0, len = 2 },
+      { pitch = 1, len = 2 },
+      { loop = { count = 0, to = 1 } },
+    } },
+  },
+}
+local tempoSides = improvement.extra(tempoSource,
+  { enabled = true, keyAware = false })
+local function tempoTrace(song, channelIndex)
+  local engine = originalNewEngine(Data, song, { allowLoops = true })
+  local channel = engine.channels[channelIndex]
+  local tempos, ticks = {}, {}
+  for i = 1, 6 do
+    for _, engineChannel in ipairs(engine.channels) do
+      engineChannel:nextEvent()
+    end
+    tempos[i] = engine.tempo
+    ticks[i] = channel.timeTicks
+  end
+  return table.concat(tempos, ","), table.concat(ticks, ",")
+end
+local baseTempos, baseTicks = tempoTrace(ChipAsm.song(tempoSource), 2)
+local bassTempos, bassTicks = tempoTrace(ChipAsm.song(tempoSides.bassDown), 1)
+T.eq(bassTempos, baseTempos,
+  "bassDown harmony follows lead tempo changes across loops")
+T.eq(bassTicks, baseTicks,
+  "bassDown note timing matches base after lead tempo change")
 
 -- ------- regeneration uses only the scoped mod cache API
 
