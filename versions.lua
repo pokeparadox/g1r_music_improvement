@@ -140,7 +140,27 @@ end
 -- Canonical name for a dataset label.  Falls back to the pretty-printed id.
 function M.nameFor(label)
   local group = M.byLabel[label]
-  return (group and group.name) or M.pretty(label)
+  if group then return group.name end
+  label = tostring(label or "")
+  if label:match("^MUS_") then
+    local ok, Song = pcall(require, "src.core.game3.song_ids")
+    if ok and type(Song) == "table" and Song.select and Song.nameOf then
+      local previous = Song.current
+      local name
+      for _, version in ipairs({ "firered", "leafgreen", "emerald", "ruby", "sapphire" }) do
+        if pcall(Song.select, version) then
+          local id = Song.resolve(label)
+          if id then
+            name = Song.nameOf(id, version)
+            if name then break end
+          end
+        end
+      end
+      if previous then pcall(Song.select, previous) end
+      if name then return name end
+    end
+  end
+  return M.pretty(label)
 end
 
 -- Describe a song id for the toast: { generation, name, kind }.
@@ -152,14 +172,19 @@ function M.describe(id, hostGeneration)
   if not kind then
     kind, base, version = raw:match("^Music_(Stock)(.-)_([%w]+)$")
   end
+  if not kind then
+    kind, base, version = raw:match("^Music_(Mix)(.-)_([%w]+)$")
+  end
   if kind then
     local source = M.BY_ID[version]
     if source then generation = source.generation end
-    local label = "Music_" .. base
+    local label = (kind == "Mix" and "MUS_" or "Music_") .. base
     return {
       generation = generation,
       name = M.nameFor(label),
-      kind = kind == "Improved" and "Improved" or "Stock",
+      kind = kind == "Improved" and "Improved"
+        or kind == "Stock" and "Stock" or "Mix",
+      mix = kind == "Mix",
     }
   end
   local group = M.byLabel[raw]
@@ -171,7 +196,7 @@ end
 
 -- `available(version, label)` filters to imported datasets that actually carry
 -- the song.  Host version is excluded so "shuffle" never picks itself.
-function M.candidates(label, hostGeneration, hostVersion, available)
+function M.candidates(label, hostGeneration, hostVersion, available, includeGen3)
   local group = M.byLabel[label]
   if not group then return {} end
   local out = {}
@@ -193,7 +218,7 @@ function M.candidates(label, hostGeneration, hostVersion, available)
     local generation = "gen" .. tostring(version.generation)
     local candidateLabel = group[generation]
     if candidateLabel and version.id ~= hostVersion
-        and (generation == "gen1" or generation == "gen2") then
+        and (includeGen3 or generation == "gen1" or generation == "gen2") then
       if allowedSources and not allowedSources[version.id] then
         -- skip
       elseif not available or available(version.id, candidateLabel) then
@@ -219,6 +244,8 @@ function M.eligible(mode, records)
       keep = id:match("^Music_Improved") ~= nil
     elseif mode == "shuffle_stock" then
       keep = id:match("^Music_Stock") ~= nil
+    elseif mode == "shuffle_mix" then
+      keep = id:match("^Music_Mix") ~= nil
     end
     if keep then out[#out + 1] = rec end
   end

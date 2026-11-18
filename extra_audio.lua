@@ -24,6 +24,7 @@ return function()
   local state = {
     engines = {},
     envelopes = {},
+    pans = {},
     sideEnabled = { left = true, center = true, right = true },
     source = nil,
     extraGain = 0.35,
@@ -73,6 +74,7 @@ return function()
     state.source = nil
     state.engines = {}
     state.envelopes = {}
+    state.pans = {}
     state.extraRendered = 0
     state.baseElapsed = 0
     state.baseLastClock = 0
@@ -139,6 +141,9 @@ return function()
       local env = state.envelopes and state.envelopes[side]
       local dynGain = sampleEnvelope(env, chunkStart / SAMPLE_RATE)
       if state.sideEnabled[side] == false then dynGain = 0 end
+      local pan = state.pans[side] or 0
+      local leftGain = 0.5 + 0.25 * (1 - pan)
+      local rightGain = 0.5 + 0.25 * (1 + pan)
       local okSd, sd = pcall(ChipSynth.soundData, engine, chunk, 1)
       if okSd and sd and dynGain > 0 then
         local ptr = nil
@@ -155,16 +160,8 @@ return function()
             local okSample, v = pcall(sd.getSample, sd, i)
             if okSample then sample = v or 0 end
           end
-          if side == "left" then
-            leftMix[i] = leftMix[i] + sample * gain * 0.8
-            rightMix[i] = rightMix[i] + sample * gain * 0.6
-          elseif side == "right" then
-            rightMix[i] = rightMix[i] + sample * gain * 0.8
-            leftMix[i] = leftMix[i] + sample * gain * 0.6
-          else
-            leftMix[i] = leftMix[i] + sample * gain * 0.5
-            rightMix[i] = rightMix[i] + sample * gain * 0.5
-          end
+          leftMix[i] = leftMix[i] + sample * gain * leftGain
+          rightMix[i] = rightMix[i] + sample * gain * rightGain
         end
       end
     end
@@ -294,6 +291,11 @@ return function()
         local ok, engine = pcall(ChipSynth.newEngine, data, sideSong, { allowLoops = true })
         if ok and type(engine) == "table" then
           state.engines[side] = engine
+          local pan = tonumber(sideSong.pan)
+          if not pan then
+            pan = side == "left" and -0.6 or side == "right" and 0.6 or 0
+          end
+          state.pans[side] = math.max(-1, math.min(1, pan))
           if type(sideSong.intensityEnvelope) == "table" then
             state.envelopes[side] = sideSong.intensityEnvelope
           end

@@ -52,6 +52,12 @@ return function(mod)
   local profiles = loadModFile("song_profiles.lua")
   if not profiles then return end
   local musicMenu = loadModFile("music_menu.lua")
+  local g3Mix = loadModFile("g3_mix.lua")
+  local mixEnabled
+  local mixCandidatesFor
+  local mixSongList
+  local mixSongListCache
+  local openMixSongs
   local improve = function(src, settings) return improveModule.improve(src, settings) end
   local extraSpec = function(src, settings, id)
     local profile = id and profiles.forLabel(id) or nil
@@ -132,6 +138,28 @@ return function(mod)
   end
 
   local extraDefs = {}
+  local function registerSpec(def, settings, id, extra)
+    local translated = translate(def, settings)
+    if not translated then return nil end
+    translated.generation = 1
+    if extra then
+      local extraSong = {}
+      for side, spec in pairs(extra) do
+        local okSong, song = pcall(ChipAsm.song, spec)
+        if okSong and type(song) == "table" and type(song.chip) == "table" then
+          song.generation = 1
+          if spec.pan then song.pan = spec.pan end
+          extraSong[side] = song
+        end
+      end
+      if next(extraSong) then
+        translated.extra = extraSong
+        extraDefs[id] = extraSong
+      end
+    end
+    return translated
+  end
+
   local function registerTranslation(def, settings, id, sourceData, extraKey)
     id = id or "Music_PalletTown"
     local oneshot = (versions and versions.groupFor and
@@ -583,6 +611,7 @@ return function(mod)
         { "SHUF ALL", "shuffle_all" },
         { "SHUF IMP", "shuffle_improved" },
         { "SHUF STK", "shuffle_stock" },
+        { "SHUF MIX", "shuffle_mix" },
         { "GEN 1", "gen1" }, { "GEN 2", "gen2" },
       } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
@@ -646,7 +675,9 @@ return function(mod)
       generation = record.generation or 1
       name = record.name
         or versions.nameFor(record.label or "")
-      if not record.native then
+      if record.mix then
+        kind = "Mix"
+      elseif not record.native then
         kind = record.improved and "Improved" or "Stock"
       end
     else
@@ -767,23 +798,25 @@ return function(mod)
     return ok and def ~= nil
   end
 
-  local function variantIdFor(nativeId, version, enabled)
+  local function variantIdFor(nativeId, version, enabled, candidate)
     local suffix = tostring(nativeId):gsub("^Music_", ""):gsub("^MUS_", "")
-    local base = enabled and "Music_Improved" or "Music_Stock"
+    local base = candidate and candidate.mix and "Music_Mix"
+      or enabled and "Music_Improved" or "Music_Stock"
     return base .. suffix .. "_" .. tostring(version)
   end
 
   local function enabledListFor(mode, userEnabled)
     if mode == "shuffle_stock" then return { false } end
     if mode == "shuffle_improved" then return { true } end
+    if mode == "shuffle_mix" then return { true } end
     if mode == "shuffle_all" then return { true, false } end
     return { userEnabled ~= false }
   end
 
   local function variantKeyFor(nativeId, candidate, enabled)
+    local kind = candidate.mix and "M" or (enabled and "I" or "S")
     return tostring(nativeId or "") .. "|" .. tostring(candidate.version)
-      .. ":" .. tostring(candidate.label)
-      .. ":" .. (enabled and "I" or "S")
+      .. ":" .. tostring(candidate.label) .. ":" .. kind
   end
 
   local function rememberVariant(nativeId, candidate, def, improvedId, enabled)
@@ -800,6 +833,7 @@ return function(mod)
       name = versions.nameFor(candidate.label),
       generation = candidate.generation,
       improved = enabled,
+      mix = candidate.mix == true,
     }
     variantByKey[key] = record
     recordById[improvedId] = record
@@ -823,6 +857,16 @@ return function(mod)
     end
     local list = versions.candidates(nativeId, hostGeneration, activeCacheGame,
       function(version, label) return sourceHasSong(sourceFor(version), label) end)
+    if mixCandidatesFor and (s.source == "shuffle_all" or s.source == "shuffle_mix") then
+      local group = versions.byLabel[nativeId]
+      local label = group and group.gen3
+        or (tostring(nativeId):match("^MUS_") and nativeId or nil)
+      if label and mixEnabled(label) then
+        for _, candidate in ipairs(mixCandidatesFor(label)) do
+          list[#list + 1] = candidate
+        end
+      end
+    end
     local wanted = versions.generationForMode(s.source)
     if not wanted then
       candidateCache[cacheKey] = list
@@ -844,7 +888,7 @@ return function(mod)
     local key = variantKeyFor(nativeId, candidate, enabled)
     local existing = variantByKey[key]
     if existing and existing.def then return existing end
-    local improvedId = variantIdFor(nativeId, candidate.version, enabled)
+    local improvedId = variantIdFor(nativeId, candidate.version, enabled, candidate)
     local path = resolveCachePath(improvedId)
     local cached = path and loadCached(path)
     if cached then
@@ -1160,7 +1204,9 @@ return function(mod)
     end
     local hash = settingsHash(settings)
     for _, id in ipairs(ids) do
-      if not tostring(id):match("^Music_Improved") then
+      if not tostring(id):match("^Music_Improved")
+          and not tostring(id):match("^Music_Stock")
+          and not tostring(id):match("^Music_Mix") then
         local def = data.audio.songs[id]
         local shouldProcess = true
         if shouldProcess then
@@ -1184,12 +1230,23 @@ return function(mod)
         end
       end
     end
+    if mixSongList and (settings.source == "shuffle_mix"
+        or settings.source == "shuffle_all") then
+      for _, label in ipairs(mixSongList()) do
+        variantIds[#variantIds + 1] = label
+      end
+    end
     if settings.source ~= "native" then
       local enabledList = enabledListFor(settings.source, settings.enabled)
       for _, id in ipairs(variantIds) do
-        if not tostring(id):match("^Music_Improved") and (hostGeneration == 3 or originalDefs[id]) then
+        if not tostring(id):match("^Music_Improved")
+            and not tostring(id):match("^Music_Stock")
+            and not tostring(id):match("^Music_Mix")
+            and (hostGeneration == 3 or originalDefs[id]
+              or settings.source == "shuffle_mix" or settings.source == "shuffle_all") then
           for _, candidate in ipairs(candidatesFor(id, settings)) do
             for _, enabled in ipairs(enabledList) do
+              if not candidate.mix or enabled then
               local s2 = { enabled = enabled, source = settings.source }
               local record = loadVariant(id, candidate, s2)
               if record then
@@ -1203,13 +1260,15 @@ return function(mod)
                   queue[#queue + 1] = {
                     kind = "variant",
                     nativeId = id,
-                    improvedId = variantIdFor(id, candidate.version, enabled),
+                    improvedId = variantIdFor(id, candidate.version, enabled, candidate),
                     version = candidate.version,
                     label = candidate.label,
                     generation = candidate.generation,
                     enabled = enabled,
+                    mix = candidate.mix == true,
                   }
                 end
+              end
               end
             end
           end
@@ -1240,6 +1299,57 @@ return function(mod)
         pcall(game.state.persistOptions, game.state)
       end
     end
+  end
+
+  -- Persisted G3 Mix song toggles: stored as comma-separated disabled labels.
+  local mixDisabled = {}
+  local mixSelectionLoaded = false
+  local function loadMixSelection()
+    if mixSelectionLoaded then return end
+    mixSelectionLoaded = true
+    local raw = mod.options:get("mix_songs") or ""
+    for label in tostring(raw):gmatch("[^,]+") do mixDisabled[label] = true end
+  end
+  mixEnabled = function(label)
+    loadMixSelection()
+    return not mixDisabled[label]
+  end
+  local function saveMixSelection()
+    local disabled = {}
+    for label, off in pairs(mixDisabled) do
+      if off then disabled[#disabled + 1] = label end
+    end
+    table.sort(disabled)
+    setModOption(readyGame, "mix_songs", table.concat(disabled, ","))
+  end
+
+  mixCandidatesFor = function(label)
+    local out = {}
+    for _, entry in ipairs(versions.VERSIONS) do
+      if entry.generation == 3 and mixEnabled(label) and g3Mix.has(entry.id, label) then
+        out[#out + 1] = {
+          version = entry.id, generation = 3, label = label, mix = true,
+        }
+      end
+    end
+    return out
+  end
+
+  mixSongList = function()
+    if mixSongListCache then return mixSongListCache end
+    local seen, labels = {}, {}
+    for _, entry in ipairs(versions.VERSIONS) do
+      if entry.generation == 3 then
+        for _, label in ipairs(g3Mix.songList(entry.id)) do
+          if not seen[label] then seen[label] = true labels[#labels + 1] = label end
+        end
+      end
+    end
+    table.sort(labels, function(a, b)
+      return versions.nameFor(a):lower() < versions.nameFor(b):lower()
+    end)
+    mixSongListCache = labels
+    return labels
   end
 
   local function clearSongCache()
@@ -1317,10 +1427,21 @@ return function(mod)
     local enabled = entry.enabled
     if enabled == nil then enabled = s.enabled ~= false end
     local ss = { enabled = enabled, source = s.source }
-    local source = sourceFor(entry.version)
-    local def = source and source.view.content.music:get(entry.label)
-    local translated = registerTranslation(def, ss, entry.label,
-      source and source.data, entry.improvedId)
+    local translated
+    if entry.mix then
+      local converted = g3Mix.convert(entry.version, entry.label)
+      if not converted then
+        mod.log:warn("music_improvement: no G3 mix data for %s (%s)",
+          tostring(entry.label), tostring(entry.version))
+        return nil
+      end
+      translated = registerSpec(converted.def, ss, entry.improvedId, converted.extra)
+    else
+      local source = sourceFor(entry.version)
+      local def = source and source.view.content.music:get(entry.label)
+      translated = registerTranslation(def, ss, entry.label,
+        source and source.data, entry.improvedId)
+    end
     if not translated then return nil end
     local data = musicData()
     if type(data) ~= "table" or type(data.audio) ~= "table" then data = { audio = {} } end
@@ -1346,11 +1467,12 @@ return function(mod)
     return prepareVariant({
       kind = "variant",
       nativeId = nativeId,
-      improvedId = variantIdFor(nativeId, candidate.version, enabled),
+      improvedId = variantIdFor(nativeId, candidate.version, enabled, candidate),
       version = candidate.version,
       label = candidate.label,
       generation = candidate.generation,
       enabled = enabled,
+      mix = candidate.mix == true,
     }, s)
   end
 
@@ -1562,6 +1684,43 @@ return function(mod)
     end,
   })
 
+  mod.content.screens:register("MusicImprovementMixSongs", {
+    new = function(game)
+      local function buildItems()
+        local items = {}
+        for _, label in ipairs(mixSongList()) do
+          items[#items + 1] = {
+            label = versions.nameFor(label),
+            right = mixEnabled(label) and "[X]" or "[ ]",
+            entry = label,
+          }
+        end
+        return items
+      end
+      local menu = mod.ui.ListMenu.new(game, "G3 MIX SONGS", buildItems(), {
+        onChoose = function() end,
+        onCancel = function() end,
+        footer = "A TOGGLE\nB DONE",
+        rows = 6,
+      })
+      local baseUpdate = menu.update
+      menu.update = function(self, dt)
+        local input = self.game and self.game.input
+        if input and input:wasPressed("a") then
+          local item = self.items[self.index]
+          if item and item.entry then
+            mixDisabled[item.entry] = not mixDisabled[item.entry]
+            saveMixSelection()
+            self.items = buildItems()
+          end
+          return
+        end
+        return baseUpdate(self, dt)
+      end
+      return menu
+    end,
+  })
+
   mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     local out = next(game, rows)
     if type(out) ~= "table" then return out end
@@ -1616,6 +1775,23 @@ return function(mod)
       },
 
       {
+        id = "musicMixSongs",
+        musicImprovementId = "music_improvement_mix_songs",
+        label = "G3 MIX SONGS",
+        value = function()
+          local count = 0
+          for _, label in ipairs(mixSongList()) do
+            if mixEnabled(label) then count = count + 1 end
+          end
+          return string.format("%d ON", count)
+        end,
+        activate = function(g)
+          local game = (type(g) == "table" and g.game) or g or readyGame
+          openMixSongs(game)
+        end,
+      },
+
+      {
         id = "sfxVol",
         musicImprovementId = "music_improvement_source",
         label = "MUSIC VERSION",
@@ -1623,12 +1799,13 @@ return function(mod)
           local source = mod.options:get("source") or "native"
           return ({ native = "NATIVE", shuffle_all = "SHUF ALL",
             shuffle_improved = "SHUF IMP", shuffle_stock = "SHUF STK",
+            shuffle_mix = "SHUF MIX",
             gen1 = "GEN 1", gen2 = "GEN 2" })[source] or "NATIVE"
         end,
         activate = function(g)
           local game = (type(g) == "table" and g.game) or g or readyGame
           local modes = { "native", "shuffle_all", "shuffle_improved",
-            "shuffle_stock", "gen1", "gen2" }
+            "shuffle_stock", "shuffle_mix", "gen1", "gen2" }
           local cur = mod.options:get("source") or "shuffle_all"
           local index = 1
           for i, mode in ipairs(modes) do if mode == cur then index = i break end end
@@ -1860,6 +2037,35 @@ return function(mod)
         })
       end
     end
+    for _, label in ipairs(mixSongList()) do
+      if not seen[label] and mixEnabled(label) then
+        local variants = {}
+        for _, record in ipairs(variantMap[label] or {}) do
+          if record.mix and record.id then
+            variants[#variants + 1] = {
+              candidate = record.candidate,
+              mix = true, improved = true,
+              generation = 3, version = record.version, id = record.id,
+            }
+          end
+        end
+        if #variants == 0 then
+          for _, candidate in ipairs(mixCandidatesFor(label)) do
+            variants[#variants + 1] = {
+              candidate = candidate, mix = true, improved = true,
+              generation = 3, version = candidate.version,
+            }
+          end
+        end
+        if #variants > 0 then
+          add({
+            name = versions.nameFor(label),
+            nativeId = label,
+            variants = variants,
+          })
+        end
+      end
+    end
     table.sort(entries, function(a, b)
       return a.name:lower() < b.name:lower()
     end)
@@ -1953,6 +2159,34 @@ return function(mod)
       musicTestPlay(game, items[1])
     end
     return menu
+  end
+
+  openMixSongs = function(game)
+    if hostIsGen3(game) then
+      local ui = gen3Ui()
+      if not ui then return false end
+      local items = {}
+      for _, label in ipairs(mixSongList()) do
+        items[#items + 1] = {
+          label = versions.nameFor(label),
+          right = mixEnabled(label) and "[X]" or "[ ]",
+          entry = label,
+        }
+      end
+      return ui.openList(game, {
+        title = "G3 MIX SONGS",
+        items = items,
+        stayOpen = true,
+        hint = { "A TOGGLE  B DONE", "DISABLED SONGS STAY NATIVE" },
+        onSelect = function(item)
+          if not item or not item.entry then return end
+          mixDisabled[item.entry] = not mixDisabled[item.entry]
+          saveMixSelection()
+          item.right = mixEnabled(item.entry) and "[X]" or "[ ]"
+        end,
+      })
+    end
+    return mod.ui.push(game, "MusicImprovementMixSongs")
   end
 
   local function openGen3Confirm(game)

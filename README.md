@@ -79,6 +79,8 @@ Includes a music testing/jukebox screen that allows available music tracks to be
 - Gen3 audio is native-only (GBA) but can make use of Gen1/Gen2 chip arrangements.
 - Chip audio plays at 45% volume on Gen3 to try and match the level of the native audio.
 - Music test and the startup enhancement prompt use a Gen3 stack modal with hints.
+- `G3 MIX` variants backport FRLG/LeafGreen song data to the expanded chip format; all M4A tracks become extra engines (no 4-channel limit).
+- `SHUF MIX` plays only mixes; `SHUF ALL` adds them to normal shuffle. `G3 MIX SONGS` toggles individual songs via checkbox; toasts read `G3 <Name> (Mix)`.
 
 ### 💾 Cache Consolidation
 - Base songs are cached per host version; improved variants are shared across hosts by source version.

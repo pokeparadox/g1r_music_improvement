@@ -67,4 +67,13 @@ assert(#V.eligible("shuffle_all", recs) == 3)
 assert(#V.eligible("gen1", recs) == 3)
 assert(#V.eligible("shuffle_improved", nil) == 0)
 
+-- G3 Mix variants carry their own kind and only join shuffle_mix/all.
+local mixInfo = V.describe("Music_MixCities1_firered", 1)
+assert(mixInfo.generation == 3 and mixInfo.kind == "Mix" and mixInfo.mix)
+assert(mixInfo.name == V.nameFor("MUS_Cities1"))
+local mixRec = { id = "Music_MixCities1_firered" }
+assert(#V.eligible("shuffle_mix", { recs[1], mixRec }) == 1)
+assert(V.eligible("shuffle_mix", { recs[1], mixRec })[1].id == mixRec.id)
+assert(#V.eligible("shuffle_all", { recs[1], mixRec }) == 2)
+
 print("versions ok")

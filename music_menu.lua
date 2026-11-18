@@ -7,12 +7,18 @@ local M = {}
 -- Version identity for cycling: native playback is its own slot.
 function M.versionKey(variant)
   if not variant then return "" end
+  if variant.mix or (variant.candidate and variant.candidate.mix) then
+    return "MIX_" .. tostring(variant.version or "")
+  end
   return tostring(variant.generation or "")
 end
 
 function M.rightText(variant)
   if not variant then return "" end
   local text = "G" .. tostring(variant.generation or 1)
+  if variant.mix or (variant.candidate and variant.candidate.mix) then
+    return "G3 MIX"
+  end
   if not variant.native then
     text = text .. (variant.improved and " IMP" or " STK")
   end
