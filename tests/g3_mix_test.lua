@@ -196,8 +196,9 @@ assert(tieOff and tieOff.key == 60 and tieOff.tick == 4, "ENDTIE emits note off"
 local loopTrack = string.char(
   0xBD, 0x01,
   0xD3, 60, 100,
+  0xB0,
   0xD3, 62, 100,
-  0xB2, 3, 0, 0, 0
+  0xB2, 6, 0, 0, 0
 )
 local loopDecoded = mix.decodeTrack(loopTrack)
 assert(loopDecoded.loopTo, "backward GOTO records loop target")
@@ -209,6 +210,25 @@ local loopSpec = mix.buildSpecs({
 local loopProgram = loopSpec.channels[1].program
 local finalLoop = loopProgram[#loopProgram].loop
 assert(finalLoop and finalLoop.to > 1, "song loop skips the intro")
+
+-- GOTO target can land inside a long wait run with no emitted event. Resolve
+-- tick from byte address, not first later note.
+local gapTrack = string.char(
+  0xBD, 0x01,
+  0xD3, 60, 100,
+  0xB0,
+  0xD4, 62, 100,
+  0xB2, 5, 0, 0, 0
+)
+local gapDecoded = mix.decodeTrack(gapTrack)
+eq(gapDecoded.loopTick, 0, "GOTO target tick uses recorded address")
+local gapProgram = mix.buildSpecs({
+  tracks = 1,
+  trackData = { gapTrack },
+  voicegroup = 1,
+}, voicegroups, { voicegroupId = 1 })[1].channels[1].program
+assert(gapProgram[#gapProgram].loop.to < #gapProgram,
+  "loop target precedes post-gap note")
 
 -- Tempo byte is half MPlay tempo; 19200/raw keeps GB note length in sync with
 -- the 0.8*raw ticks/second M4A sequencer.

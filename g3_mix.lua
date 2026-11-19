@@ -115,6 +115,7 @@ function M.decodeTrack(data)
   local runningStatus
   local noteSeen = {}
   local commandAddress = 0
+  local tickAt = {}
   local loopSeq, loopTick, sequence = nil, nil, 0
   local add
   local function currentPitch()
@@ -160,6 +161,9 @@ function M.decodeTrack(data)
       break
     else
       commandAddress = pc
+      -- Loops revisit addresses; keep first pass tick so GOTO target resolves
+      -- to original position, not a later repeat iteration.
+      if tickAt[pc] == nil then tickAt[pc] = tick end
       local cmd = read()
       if cmd == nil then break end
       local noteKeyOverride
@@ -186,10 +190,20 @@ function M.decodeTrack(data)
       elseif cmd == 0xB2 then
         local target = read32()
         if target < #data and target < pc then
-          loopSeq, loopTick = nil, nil
+          -- Native GOTO target is a byte address, not an emitted event. Long
+          -- wait runs can put target in a gap; use tick recorded when decoder
+          -- walked that address instead of first later event tick.
+          loopTick = tickAt[target]
+          if not loopTick then
+            for address = target - 1, 0, -1 do
+              if tickAt[address] then loopTick = tickAt[address] break end
+            end
+          end
+          loopSeq = nil
           for _, event in ipairs(events) do
             if event.address >= target then
-              loopSeq, loopTick = event.seq, event.tick
+              loopSeq = event.seq
+              if not loopTick then loopTick = event.tick end
               break
             end
           end
@@ -649,7 +663,7 @@ function M.buildSpecs(song, voicegroups, info)
   for i = 1, song.tracks do
     decoded[i] = M.decodeTrack(song.trackData and song.trackData[i] or "")
   end
-  local lastTick, globalLoopTick = 1, 0
+  local lastTick, globalLoopTick, hasLoop = 1, 0, false
   local tempoByTick = {}
   for _, track in ipairs(decoded) do
     local ticks = track.ticks or 0
@@ -663,11 +677,14 @@ function M.buildSpecs(song, voicegroups, info)
       end
     end
     lastTick = math.max(lastTick, ticks)
-    globalLoopTick = math.max(globalLoopTick, track.loopTick or 0)
+    if track.loopTick ~= nil then
+      globalLoopTick = math.max(globalLoopTick, track.loopTick)
+      hasLoop = true
+    end
   end
   if lastTick < 1 then lastTick = 1 end
   if lastTick > 200000 then lastTick = 200000 end
-  if globalLoopTick <= 0 then globalLoopTick = lastTick end
+  if not hasLoop then globalLoopTick = lastTick end
 
   -- Every chip engine must obey the same tempo changes and loop boundary;
   -- otherwise the extra channels drift against the base song.
@@ -755,14 +772,13 @@ function M.buildSpecs(song, voicegroups, info)
       return (a.seq or 0) < (b.seq or 0)
     end)
 
-    local eventProgramIndex, tickIndex = {}, {}
+    local eventProgramIndex = {}
     for index, event in ipairs(events) do
       if event.tick > cursor then
         emitRest(program, event.tick - cursor)
         cursor = event.tick
       end
       eventProgramIndex[index] = #program + 1
-      tickIndex[event.tick] = #program + 1
       if event.kind == "tempo" then
         currentTempo = event.tempo or currentTempo
         -- tick 0 is already written by ChipAsm's tempo prelude.
@@ -799,7 +815,15 @@ function M.buildSpecs(song, voicegroups, info)
       emitRest(program, globalLoopTick - cursor)
       cursor = globalLoopTick
     end
-    local loopTarget = tickIndex[globalLoopTick] or (#program + 1)
+    -- First event at/after loop tick; no event exactly on tick is common
+    -- when loop falls inside a rest run.
+    local loopTarget = #program + 1
+    for index, event in ipairs(events) do
+      if event.tick >= globalLoopTick then
+        loopTarget = eventProgramIndex[index]
+        break
+      end
+    end
     if cursor < lastTick then emitRest(program, lastTick - cursor) end
     -- Every engine repeats from the same timeline position.  Native M4A
     -- tracks may start their loop at different event indices; per-track loop
