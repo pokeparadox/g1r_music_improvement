@@ -64,23 +64,22 @@ This keeps the enhanced soundtrack consistent with the game's original audio arc
 ### 🎼 Music Testing
 Includes a music testing/jukebox screen that allows available music tracks to be selected and played directly.
 
-- Lists each unique song once, with its available source generations.
-- **Left/Right** cycles the source **generation** of the selected song.
-- **Select** toggles between **Improved** and **Stock** arrangements for that generation.
-- **A** plays the selected arrangement; **B** exits.
-- Control hints are shown at the bottom of the screen (including on Gen3).
-- Toasts announce playback as `G<n> <Canonical Name> (Improved|Stock)`.
+- Lists each unique song once, with all available variations: `G1`, `G1 (Improved)`, `G2`, `G2 (Improved)`, `G3`, `G3 (Mix)`.
+- **LEFT/RIGHT** cycles variations in that order; **A** plays; **B** exits.
+- G3 native appears only on Gen3 hosts; G3 Mix appears on every host.
+- Music test previews every available variation; settings toggles affect automatic playback only.
+- Toasts announce the active variation as `<Song> — <LABEL>` (e.g. `Route 1 — G2 (Improved)`).
 
 ### 🔀 Cross-Version Sourcing
 - Any Gen1 or Gen2 song can be sourced from another Gen1/Gen2 version (red, blue, yellow, gold, silver, crystal) for its improved arrangement.
-- Shuffle modes: `shuffle_all`, `shuffle_improved`, `shuffle_stock`, `gen1`, `gen2`; each song change rolls a new source version.
+- Automatic playback uses `SHUFFLE` plus per-kind toggles (`G1`, `G1 (Improved)`, `G2`, `G2 (Improved)`, `G3 (Mix)`); labels follow the source version, not the host. With shuffle off, highest quality available wins: native `G3` on Gen3 hosts → `G3 (Mix)` → Improved → stock, with host generation first inside each tier.
 
 ### 🎮 Gen3 (FRLG) Support
 - Gen3 audio is native-only (GBA) but can make use of Gen1/Gen2 chip arrangements.
 - Chip audio plays at 45% volume on Gen3 to try and match the level of the native audio.
 - Music test and the startup enhancement prompt use a Gen3 stack modal with hints.
 - `G3 MIX` variants backport FRLG/LeafGreen song data to the expanded chip format; all M4A tracks become extra engines (no 4-channel limit).
-- `SHUF MIX` plays only mixes; `SHUF ALL` adds them to normal shuffle. `G3 MIX SONGS` toggles individual songs via checkbox; toasts read `G3 <Name> (Mix)`.
+- `SHUF MIX` remains legacy shorthand. `G3 MIX SONGS` toggles individual mixes via checkbox; music test previews all variations.
 
 ### 💾 Cache Consolidation
 - Base songs are cached per host version; improved variants are shared across hosts by source version.

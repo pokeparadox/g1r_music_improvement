@@ -15,6 +15,13 @@ local CLOCK = {
   48, 52, 54, 56, 60, 64, 66, 68, 72, 76, 78, 80, 84, 88, 90, 92, 96,
 }
 
+local function copyTable(t)
+  if type(t) ~= "table" then return nil end
+  local out = {}
+  for k, v in pairs(t) do out[k] = v end
+  return out
+end
+
 function M.clockAt(index)
   index = tonumber(index) or 0
   if index < 0 then index = 0 end
@@ -28,8 +35,24 @@ function M.decodeTrack(data)
   local key, vel, voice = 60, 100, 0
   local volume, pan, tempo = 100, 0x40, 150
   local keyShift, bend, bendRange = 0, 0, 2
-  local repeats, jumps = {}, 0
-  local loopTo
+  local repeats, jumps, callStack, mem = {}, 0, {}, {}
+  local toneOverrides
+  local runningStatus
+  local noteSeen = {}
+  local commandAddress = 0
+  local loopSeq, loopTick, sequence = nil, nil, 0
+  local add
+  local function currentPitch()
+    return key + keyShift + bend * bendRange
+  end
+  local lastPitch
+  local function emitPitch()
+    local pitch = currentPitch()
+    if pitch ~= lastPitch then
+      lastPitch = pitch
+      add("pitch", { key = pitch })
+    end
+  end
   local function read()
     if pc >= #data then return nil end
     local b = data:byte(pc + 1)
@@ -41,12 +64,15 @@ function M.decodeTrack(data)
     for i = 0, 3 do n = n + (read() or 0) * 256 ^ i end
     return n
   end
-  local function add(kind, fields)
+  add = function(kind, fields)
     local event = fields or {}
     event.kind = kind
+    sequence = sequence + 1
+    event.seq = sequence
     event.tick = tick
-    event.address = pc
+    event.address = commandAddress
     events[#events + 1] = event
+    return event
   end
 
   local guard = 0
@@ -58,8 +84,26 @@ function M.decodeTrack(data)
     elseif tick > 200000 then
       break
     else
+      commandAddress = pc
       local cmd = read()
       if cmd == nil then break end
+      local noteKeyOverride
+      if cmd < 0x80 and runningStatus and runningStatus >= 0xCF then
+        -- A bare key byte reuses the previous note command as running status.
+        noteKeyOverride = cmd
+        cmd = runningStatus
+      elseif cmd < 0x80 and runningStatus then
+        -- Non-note running status keeps its data byte at pc.  m4a_seq.lua
+        -- only advances pc for status bytes, so the reused command reads
+        -- that byte as its first operand.  Consuming it here truncated
+        -- 0xCD XRMI chains and dropped most of a song's notes.
+        pc = pc - 1
+        cmd = runningStatus
+      elseif cmd < 0x80 then
+        cmd = runningStatus or cmd
+      elseif cmd >= 0xBD then
+        runningStatus = cmd
+      end
       if cmd >= 0x80 and cmd <= 0xB0 then
         wait = M.clockAt(cmd - 0x80)
       elseif cmd == 0xB1 then
@@ -67,33 +111,50 @@ function M.decodeTrack(data)
       elseif cmd == 0xB2 then
         local target = read32()
         if target < #data and target < pc then
-          loopTo = nil
-          for index, event in ipairs(events) do
-            if event.address >= target then loopTo = index break end
+          loopSeq, loopTick = nil, nil
+          for _, event in ipairs(events) do
+            if event.address >= target then
+              loopSeq, loopTick = event.seq, event.tick
+              break
+            end
           end
           break
         elseif target < #data and jumps < 64 then
           jumps = jumps + 1
           pc = target
         end
-      elseif cmd == 0xB3 or cmd == 0xB4 or cmd == 0xB5 then
-        -- Calls/repeats are flattened; only backward repeats become loops.
-        local countOrAddr = cmd == 0xB5 and read() or nil
+      -- CALL (4-byte addr), RET (no operand), REPEAT (count + 4-byte addr).
+      -- Match m4a_seq.exec_cmd exactly; a shared read here would consume
+      -- bogus bytes after RET and corrupt every following note.
+      elseif cmd == 0xB3 then
         local target = read32()
-        if target < #data and jumps < 64 then
-          repeats[target] = (repeats[target] or 0) + 1
-          if countOrAddr == nil or countOrAddr == 0
-              or repeats[target] < countOrAddr then
-            jumps = jumps + 1
-            pc = target
-          end
+        if target < #data and #callStack < 3 then
+          callStack[#callStack + 1] = pc
+          pc = target
+        else
+          break
         end
+      elseif cmd == 0xB4 then
+        if #callStack > 0 then pc = table.remove(callStack) end
+      elseif cmd == 0xB5 then
+        local count = read() or 0
+        local target = read32()
+        local times = (repeats[target] or 0) + 1
+        repeats[target] = times
+        if count == 0 or times < count then
+          if target < #data then pc = target end
+        else
+          repeats[target] = 0
+        end
+      elseif cmd == 0xBA then
+        read() -- priority
       elseif cmd == 0xBB then
         tempo = (read() or 75) * 2
         add("tempo", { tempo = tempo })
       elseif cmd == 0xBC then
         keyShift = read() or 0
         if keyShift > 127 then keyShift = keyShift - 256 end
+        emitPitch()
       elseif cmd == 0xBD then
         voice = read() or 0
       elseif cmd == 0xBE then
@@ -102,27 +163,56 @@ function M.decodeTrack(data)
         pan = read() or 0x40
       elseif cmd == 0xC0 then
         bend = (read() or 0x40) - 0x40
+        emitPitch()
       elseif cmd == 0xC1 then
         bendRange = read() or 2
+        emitPitch()
+      elseif cmd >= 0xC2 and cmd <= 0xC5 then
+        read() -- LFO speed/delay, modulation depth/type
       elseif cmd == 0xC8 then
         -- TUNE is centred on 0x40; approximation folds it into semitones.
         local tune = (read() or 0x40) - 0x40
         keyShift = keyShift + math.floor(tune / 8)
+        emitPitch()
       elseif cmd == 0xCD then
         local xop = read() or 0
-        if xop == 12 then read(); read()
+        local fields = {
+          [2] = "type", [4] = "attack", [5] = "decay",
+          [6] = "sustain", [7] = "release", [10] = "length", [11] = "pan",
+        }
+        if xop == 12 then
+          -- REST: 16-bit wait override (m4a_seq.lua xop 12).  Older builds
+          -- only consumed the bytes, so rest sections fired too early.
+          local low = read() or 0
+          local high = read() or 0
+          wait = low + high * 256
         elseif xop == 13 or xop == 1 then read(); read(); read(); read()
-        elseif xop == 8 or xop == 9 or xop == 2 or xop == 4 or xop == 5
-            or xop == 6 or xop == 7 or xop == 10 or xop == 11 then read()
+        elseif fields[xop] then
+          -- Tone overrides from 0xCD are the main source of ADSR/pan changes;
+          -- keeping them lets the chip spec approximate the original envelope.
+          toneOverrides = toneOverrides or {}
+          toneOverrides[fields[xop]] = read() or 0
+        elseif xop == 8 or xop == 9 then read()
+        else
+          -- Engine terminates the track on unknown XRMI commands.
+          break
         end
       elseif cmd == 0xCE then
-        local nextByte = data:byte(pc + 1)
-        if nextByte and nextByte < 0x80 then pc = pc + 1 end
+        -- ENDTIE releases the current (or explicitly named) key.  Without an
+        -- off event tied notes sustain until the next note or song end.
+        local offKey = data:byte(pc + 1)
+        if offKey and offKey < 0x80 then
+          pc = pc + 1
+          key = offKey
+        end
+        add("off", { key = key })
       elseif cmd >= 0xCF then
         local gate = M.clockAt(cmd - 0xCF)
-        local nextByte = data:byte(pc + 1)
-        if nextByte and nextByte < 0x80 then
-          key = read()
+        if noteKeyOverride then
+          key = noteKeyOverride
+        else
+          local nextByte = data:byte(pc + 1)
+          if nextByte and nextByte < 0x80 then key = read() end
         end
         nextByte = data:byte(pc + 1)
         if nextByte and nextByte < 0x80 then
@@ -134,32 +224,86 @@ function M.decodeTrack(data)
         end
         if gate < 1 then gate = 1 end
         if gate > 512 then gate = 512 end
-        add("note", {
-          key = key + keyShift + bend * bendRange,
-          rawKey = key,
-          vel = vel,
-          gate = gate,
-          voice = voice,
-          volume = volume,
-          pan = pan,
-          tempo = tempo,
-        })
+        -- MP2K uses very low velocities for dummy/echo triggers.  Dropping
+        -- them avoids audible clicks; duplicates at the same tick share one
+        -- note with reduced gain.
+        if vel >= 20 then
+          local pitch = currentPitch()
+          local slot = tick .. ":" .. key
+          local existing = noteSeen[slot]
+          if existing then
+            if vel > (existing.vel or 0) then existing.vel = vel end
+            if vel < (existing.vel or 0) then
+              existing.volume = math.floor((existing.volume or 100) * 0.6)
+            else
+              existing.volume = math.floor((existing.volume or 100) * 0.8)
+            end
+          else
+            local event = add("note", {
+              key = pitch,
+              rawKey = key,
+              vel = vel,
+              gate = gate,
+              voice = voice,
+              volume = volume,
+              pan = pan,
+              tempo = tempo,
+              toneOverrides = toneOverrides and copyTable(toneOverrides) or nil,
+            })
+            noteSeen[slot] = event
+            lastPitch = pitch
+          end
+        end
       elseif cmd == 0xCC then
         read(); read()
       elseif cmd == 0xB9 then
-        local op = read() or 0
-        read(); read()
-        if op >= 6 and op <= 17 then read32() end
+        -- MP2K memory/conditional jump.  Older decoder consumed operands but
+        -- never took the branch, so conditional sections never sounded.
+        local memOp = read() or 0
+        local addr = read() or 0
+        local dataByte = read() or 0
+        local value = mem[addr] or 0
+        local useMemory = (memOp >= 3 and memOp <= 5) or memOp >= 12
+        local operand = useMemory and (mem[dataByte] or 0) or dataByte
+        if memOp <= 5 then
+          local action = memOp % 3
+          if action == 0 then value = operand
+          elseif action == 1 then value = value + operand
+          else value = value - operand end
+          mem[addr] = value % 256
+        elseif memOp <= 17 then
+          local target = read32()
+          local cond = (memOp - 6) % 6
+          local take = (cond == 0 and value == operand)
+            or (cond == 1 and value ~= operand)
+            or (cond == 2 and value > operand)
+            or (cond == 3 and value >= operand)
+            or (cond == 4 and value <= operand)
+            or (cond == 5 and value < operand)
+          if take and target and target < #data then
+            pc = target
+            jumps = jumps + 1
+            if jumps > 4000 then break end
+          end
+        end
       else
         break
       end
     end
   end
+  -- Execution order matters: CALL/REPEAT reach lower addresses after higher
+  -- ones.  Sorting purely by address scrambles those sections.
   table.sort(events, function(a, b)
     if a.tick ~= b.tick then return a.tick < b.tick end
-    return a.address < b.address
+    return a.seq < b.seq
   end)
-  return { events = events, loopTo = loopTo, ticks = tick }
+  local loopTo
+  if loopSeq then
+    for index, event in ipairs(events) do
+      if event.seq == loopSeq then loopTo = index break end
+    end
+  end
+  return { events = events, loopTo = loopTo, loopTick = loopTick, ticks = tick }
 end
 
 local WAVES = {
@@ -175,12 +319,43 @@ local WAVES = {
      -1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1, 1, 1 },
 }
 
-local DRUMS = {
-  [1] = { { len = 12, volume = 14, fade = 6, parameter = 1 } },
-  [2] = { { len = 8, volume = 12, fade = 8, parameter = 3 } },
-  [3] = { { len = 16, volume = 10, fade = 4, parameter = 5 } },
-  [4] = { { len = 6, volume = 15, fade = 10, parameter = 7 } },
+-- MP2K rhythm kits use MIDI key numbers to pick a drum sample.  The old
+-- converter used rawKey % 4, which made kick/snare/hat interchangeable.
+-- Noise presets: id 1 hat, 2 snare/rim, 3 tom, 4 kick, 5 cymbal.
+local DRUM_PRESETS = {
+  hat      = { id = 1, kind = 4, fade = 7, duty = 1 },
+  snare    = { id = 2, kind = 4, fade = 6, duty = 1 },
+  tom      = { id = 3, kind = 4, fade = 7, duty = 1 },
+  kick     = { id = 4, kind = 4, fade = 7, duty = 1 },
+  cymbal   = { id = 5, kind = 4, fade = 5, duty = 1 },
+  tomPulse = { id = 3, kind = 1, fade = -3, duty = 1 },
 }
+
+-- Drum peaks sit just above the perceptual melody range (roughly 6-10 after
+-- the volume curve below).  The old 10-14 table buried quiet tracks.
+local DRUMS = {
+  [1] = { { len = 4, volume = 9, fade = 7, parameter = 1 } },
+  [2] = { { len = 8, volume = 8, fade = 6, parameter = 3 } },
+  [3] = { { len = 12, volume = 8, fade = 7, parameter = 5 } },
+  [4] = { { len = 14, volume = 10, fade = 7, parameter = 7 } },
+  [5] = { { len = 16, volume = 7, fade = 5, parameter = 0 } },
+}
+
+local function drumPresetFor(rawKey)
+  local key = tonumber(rawKey) or 60
+  if key <= 36 then return DRUM_PRESETS.kick end
+  if key == 38 or key == 40 then return DRUM_PRESETS.snare end
+  if key == 41 or key == 43 or key == 45 or key == 47 then
+    return DRUM_PRESETS.tomPulse
+  end
+  if key == 42 or key == 44 or key == 54 or key == 56 then
+    return DRUM_PRESETS.hat
+  end
+  if key >= 46 and key <= 53 then return DRUM_PRESETS.cymbal end
+  if key >= 35 and key <= 81 then return DRUM_PRESETS.snare end
+  return nil
+end
+M.drumPresetFor = drumPresetFor
 
 local function tableValue(t, key)
   if type(t) ~= "table" then return nil end
@@ -214,29 +389,52 @@ local function resolveTone(voicegroups, vgId, voiceId, rawKey, depth)
   return tone
 end
 
-local function toneInfo(voicegroups, vgId, note)
+local function toneInfo(voicegroups, vgId, note, specWaves)
   local tone = resolveTone(voicegroups, vgId, note.voice, note.rawKey)
+  if tone and tone.isRhy then
+    local preset = drumPresetFor(note.rawKey or note.key)
+    if preset then
+      note.drumPreset = preset
+      return preset.kind, preset.duty, nil, tone
+    end
+  end
   local typ = tone and tone.type or 0
   local kind = typ % 8
   if kind < 1 or kind > 4 then kind = 1 end
   if kind == 1 or kind == 2 then
     local wp = tone and tone.wavParam or 0
-    return kind, wp <= 3 and wp or 2, nil
+    return kind, wp <= 3 and wp or 2, nil, tone
   end
   if kind == 3 then
     local wave = tone and tone.wave
+    if specWaves and type(wave) == "table" and #wave >= 32 then
+      local signature = {}
+      for i = 1, 32 do signature[i] = tostring(tonumber(wave[i]) or 0) end
+      signature = table.concat(signature, ",")
+      for index, existing in ipairs(specWaves) do
+        if existing.signature == signature then return kind, 0, #WAVES + index, tone end
+      end
+      if #specWaves < 12 then
+        specWaves[#specWaves + 1] = { signature = signature, wave = wave }
+        return kind, 0, #WAVES + #specWaves, tone
+      end
+    end
     local waveIndex = 0
     if type(wave) == "table" and #wave >= 32 then
       local sum = 0
       for i = 1, 16 do sum = sum + (tonumber(wave[i]) or 0) end
       waveIndex = math.abs(math.floor(sum / 4)) % 4
     end
-    return kind, 0, waveIndex
+    return kind, 0, waveIndex, tone
   end
-  return 4, 0, nil
+  return 4, 0, nil, tone
 end
 
 local function gbTempo(tempo)
+  -- M4A stores half the sequencer tempo. Seq.update runs one VBlank frame
+  -- at a time and advances tempo/150 seq ticks per frame, so seq ticks are
+  -- 60*tempo/150 = 0.4*tempo per second. GB ticks are 15360/s, hence
+  -- 38400/tempo. The earlier 19200 constant played everything 2x too fast.
   local value = math.floor(38400 / math.max(1, tempo) + 0.5)
   if value < 1 then value = 1 end
   if value > 0xFFFF then value = 0xFFFF end
@@ -264,17 +462,74 @@ local function emitRest(program, ticks)
   end
 end
 
-local function emitNote(program, note, role, duty, waveIndex)
-  local tempo = math.max(1, note.tempo or 150)
-  local speed = math.max(1, math.min(15, math.ceil(note.gate / 16)))
-  local length = math.max(1, math.floor(note.gate / speed + 0.5))
+-- Full ADSR approximation.  MP2K has no direct GB equivalent; attack/decay/
+-- sustain choose the square envelope and duty.  0xCD overrides win over the
+-- voicegroup tone.  Kept public for focused converter tests.
+function M.envelopeFor(note, duty)
+  local ov = note.toneOverrides or {}
+  local tone = note.tone or {}
+  local value = function(name)
+    return ov[name] or tone[name]
+  end
+  -- Seq.trackVolume gives ~vel*volume/33025 mono gain.  GB volume steps are
+  -- roughly 1.5 dB, so map gain through sqrt instead of a linear product;
+  -- the linear form crushed quiet tracks into buckets 0-2.
+  local gain = math.max(0, math.min(1,
+    (note.vel or 100) / 127 * (note.volume or 100) / 255))
   local volume = math.max(0, math.min(15,
-    math.floor((note.vel or 100) / 127 * (note.volume or 100) / 100 * 15 + 0.5)))
+    math.floor(math.sqrt(gain) * 15 + 0.5)))
+  local attack, decay, sustain = value("attack"), value("decay"), value("sustain")
+  local fade, resolvedDuty = 0, duty or 2
+  if note.drumPreset then
+    fade = note.drumPreset.fade or 0
+    resolvedDuty = note.drumPreset.duty or resolvedDuty
+  elseif (sustain and sustain < 8) or (decay and decay >= 10) then
+    -- Pluck/percussion: steep decay, thin duty for bite.
+    fade, resolvedDuty = 5, 1
+  elseif sustain and sustain < 12 then
+    fade, resolvedDuty = 3, 2
+  elseif attack and attack <= 1 and sustain and sustain >= 12
+      and (decay or 0) <= 4 then
+    -- Slow strings/brass: slight swell, 50% duty.
+    fade, resolvedDuty = -1, 3
+  elseif decay and decay > 0 then
+    fade = 1
+  end
+  return volume, math.max(-7, math.min(7, fade)), resolvedDuty
+end
+
+-- Pick a GB speed/length pair that reproduces an M4A gate exactly.  Rounding
+-- each note to ceil(gate/16) loses up to 15 ticks per note, which drifts
+-- against the other channels and the parent base song.
+function M.noteTiming(gate)
+  local ticks = math.max(1, math.floor(gate + 0.5))
+  local bestSpeed, bestLength, bestError = 1, 1, math.huge
+  for speed = 1, 15 do
+    local length = ticks / speed
+    local rounded = math.max(1, math.floor(length + 0.5))
+    if rounded <= 16 then
+      local error = math.abs(rounded * speed - ticks)
+      if error < bestError then
+        bestSpeed, bestLength, bestError = speed, rounded, error
+      end
+      if error == 0 then break end
+    end
+  end
+  return bestSpeed, bestLength
+end
+
+local function emitNote(program, note, hw, kind, duty, waveIndex, withNotetype)
+  local tempo = math.max(1, note.tempo or 150)
+  local speed, length = M.noteTiming(note.gate)
+  local volume, fade, duty = M.envelopeFor(note, duty)
   local key = math.max(12, math.min(119, math.floor(note.key or 60)))
   local pitch, octave = key % 12, math.floor(key / 12) - 1
-  if role == 4 then
-    program[#program + 1] = { notetype = { speed = speed, volume = volume } }
-    local drum = ((note.rawKey or key) % 4) + 1
+  if hw == 4 then
+    if withNotetype ~= false then
+      program[#program + 1] = { notetype = { speed = speed, volume = volume } }
+    end
+    local drum = note.drumPreset and note.drumPreset.id
+      or ((note.rawKey or key) % 4) + 1
     local remaining = length
     while remaining > 0 do
       local chunk = math.min(remaining, 16)
@@ -283,15 +538,20 @@ local function emitNote(program, note, role, duty, waveIndex)
     end
     return
   end
-  if role == 3 then
-    program[#program + 1] = {
-      notetype = { speed = speed, waveLevel = 3, waveInstrument = waveIndex or 0 },
-    }
+  if hw == 3 then
+    if withNotetype ~= false then
+      -- ChipSynth wave level 3 is quarter amplitude.  Fixed level 3 made
+      -- every wave instrument inaudible next to the pulse tracks.
+      local waveLevel = volume >= 10 and 1 or (volume >= 6 and 2 or 3)
+      program[#program + 1] = {
+        notetype = { speed = speed, waveLevel = waveLevel, waveInstrument = waveIndex or 0 },
+      }
+    end
     -- ChipSynth's wave channel sounds an octave below the pulse register.
     pitch = key % 12
     octave = math.floor(key / 12)
-  else
-    program[#program + 1] = { notetype = { speed = speed, volume = volume, fade = 0 } }
+  elseif withNotetype ~= false then
+    program[#program + 1] = { notetype = { speed = speed, volume = volume, fade = fade } }
     program[#program + 1] = { duty = duty or 2 }
   end
   if octave < 1 then octave = 1 elseif octave > 8 then octave = 8 end
@@ -306,26 +566,47 @@ end
 
 function M.buildSpecs(song, voicegroups, info)
   if type(song) ~= "table" or not song.tracks or song.tracks < 1 then return nil end
-  local vgId = song.voicegroup or (info and info.voicegroupId)
+  -- FRLG song blobs store a ROM pointer in `voicegroup`; the playable cache
+  -- index carries the real voicegroup number.  Using the pointer misses every
+  -- tone, collapsing all instruments to one duty and one envelope.
+  local vgId = (info and info.voicegroupId) or song.voicegroup
   local decoded = {}
   for i = 1, song.tracks do
     decoded[i] = M.decodeTrack(song.trackData and song.trackData[i] or "")
   end
-  local lastTick = 1
+  local lastTick, globalLoopTick = 1, 0
+  local tempoByTick = {}
   for _, track in ipairs(decoded) do
     local ticks = track.ticks or 0
     for _, event in ipairs(track.events) do
       if event.kind == "note" then
         ticks = math.max(ticks, event.tick + (event.gate or 1))
+      elseif event.kind == "tempo" then
+        local tick = event.tick or 0
+        local current = tempoByTick[tick]
+        if not current or tick == 0 then tempoByTick[tick] = event.tempo or current end
       end
     end
     lastTick = math.max(lastTick, ticks)
+    globalLoopTick = math.max(globalLoopTick, track.loopTick or 0)
   end
   if lastTick < 1 then lastTick = 1 end
   if lastTick > 200000 then lastTick = 200000 end
+  if globalLoopTick <= 0 then globalLoopTick = lastTick end
 
-  local programs = {}
-  for index, track in ipairs(decoded) do
+  -- Every chip engine must obey the same tempo changes and loop boundary;
+  -- otherwise the extra channels drift against the base song.
+  local tempoTimeline = {}
+  for tick, tempo in pairs(tempoByTick) do
+    tempoTimeline[#tempoTimeline + 1] = { tick = tick, tempo = tempo }
+  end
+  table.sort(tempoTimeline, function(a, b) return a.tick < b.tick end)
+  local baseTempo = 150
+  if tempoTimeline[1] and tempoTimeline[1].tick == 0 then
+    baseTempo = tempoTimeline[1].tempo or baseTempo
+  end
+
+  local function dominantKind(track)
     local kinds = {}
     for _, event in ipairs(track.events) do
       if event.kind == "note" then
@@ -333,70 +614,172 @@ function M.buildSpecs(song, voicegroups, info)
         kinds[kind] = (kinds[kind] or 0) + 1
       end
     end
-    local dominant = 1
-    local best = 0
+    local dominant, best = 1, 0
     for kind, count in pairs(kinds) do
       if count > best then dominant, best = kind, count end
     end
+    return dominant
+  end
+
+  local function buildProgram(track, hw, specWaves)
     local program = {}
-    local cursor, currentTempo = 0, 150
+    local panSum, panCount = 0, 0
+    local cursor, currentTempo = 0, baseTempo
+    -- A new note on the same M4A track or an ENDTIE cuts the previous voice.
+    -- Clamp gate to the next cut so note spacing matches the source sequence.
+    local gates = {}
+    local nextNoteTick
+    local offTicks = {}
+    for index = #track.events, 1, -1 do
+      local event = track.events[index]
+      if event.kind == "off" then
+        offTicks[event.key] = event.tick
+      elseif event.kind == "note" then
+        local gate = event.gate or 1
+        local cut = offTicks[event.rawKey]
+        if nextNoteTick and (not cut or nextNoteTick < cut) then cut = nextNoteTick end
+        if cut then gate = math.min(gate, math.max(1, cut - event.tick)) end
+        gates[index] = gate
+        nextNoteTick = event.tick
+      end
+    end
     for _, event in ipairs(track.events) do
+      if event.kind == "note" then
+        panSum = panSum + (event.pan or 0x40)
+        panCount = panCount + 1
+      end
+    end
+    track.pan = panCount > 0 and math.max(-1, math.min(1,
+      (panSum / panCount - 0x40) / 0x80)) or 0
+    local pitchEvents = {}
+    for _, event in ipairs(track.events) do
+      if event.kind == "pitch" then pitchEvents[#pitchEvents + 1] = event end
+    end
+    -- Merge the song-wide tempo timeline into this channel's own events.
+    -- Tempo changes always come first at a given tick so all engines change
+    -- speed on the same event, matching the native M4A sequencer.
+    local events = {}
+    for index, event in ipairs(track.events) do
+      if event.kind ~= "tempo" then
+        local copy = {}
+        for key, value in pairs(event) do copy[key] = value end
+        copy._index = index
+        events[#events + 1] = copy
+      end
+    end
+    for _, tempo in ipairs(tempoTimeline) do
+      events[#events + 1] = {
+        kind = "tempo", tick = tempo.tick, tempo = tempo.tempo, seq = -1,
+      }
+    end
+    table.sort(events, function(a, b)
+      if a.tick ~= b.tick then return a.tick < b.tick end
+      if (a.kind == "tempo") ~= (b.kind == "tempo") then
+        return a.kind == "tempo"
+      end
+      return (a.seq or 0) < (b.seq or 0)
+    end)
+
+    local eventProgramIndex, tickIndex = {}, {}
+    for index, event in ipairs(events) do
       if event.tick > cursor then
         emitRest(program, event.tick - cursor)
         cursor = event.tick
       end
+      eventProgramIndex[index] = #program + 1
+      tickIndex[event.tick] = #program + 1
       if event.kind == "tempo" then
         currentTempo = event.tempo or currentTempo
-        program[#program + 1] = { tempo = gbTempo(currentTempo) }
+        -- tick 0 is already written by ChipAsm's tempo prelude.
+        if event.tick > 0 then program[#program + 1] = { tempo = gbTempo(currentTempo) } end
       elseif event.kind == "note" then
-        local kind, duty, waveIndex = toneInfo(voicegroups, vgId, event)
-        local role = dominant
-        if dominant == 1 then role = kind end
-        emitNote(program, event, role, duty, waveIndex)
+        local kind, duty, waveIndex, tone = toneInfo(voicegroups, vgId, event, specWaves)
+        event.tone = tone
+        local gate = gates[event._index or index] or event.gate or 1
+        -- Split at BEND/TUNE changes so pitch glides are approximated without
+        -- retriggering the envelope on each tied segment.
+        local boundaries = { { tick = event.tick, key = event.key } }
+        for _, pitchEvent in ipairs(pitchEvents) do
+          if pitchEvent.tick > event.tick and pitchEvent.tick < event.tick + gate
+              and pitchEvent.key ~= boundaries[#boundaries].key then
+            boundaries[#boundaries + 1] = {
+              tick = pitchEvent.tick,
+              key = pitchEvent.key,
+            }
+          end
+        end
+        boundaries[#boundaries + 1] = { tick = event.tick + gate }
+        for part = 1, #boundaries - 1 do
+          local note = {}
+          for key, value in pairs(event) do note[key] = value end
+          note.gate = boundaries[part + 1].tick - boundaries[part].tick
+          note.key = boundaries[part].key
+          emitNote(program, note, hw, kind, duty, waveIndex, part == 1)
+        end
+        cursor = math.max(cursor, event.tick + gate)
       end
     end
-    if cursor < lastTick then emitRest(program, lastTick - cursor) end
     if #program == 0 then emitRest(program, 16) end
-    program[#program + 1] = { loop = { count = 0, to = 1 } }
-    programs[index] = program
+    if cursor < globalLoopTick then
+      emitRest(program, globalLoopTick - cursor)
+      cursor = globalLoopTick
+    end
+    local loopTarget = tickIndex[globalLoopTick] or (#program + 1)
+    if cursor < lastTick then emitRest(program, lastTick - cursor) end
+    -- Every engine repeats from the same timeline position.  Native M4A
+    -- tracks may start their loop at different event indices; per-track loop
+    -- markers desync the extra chips from the base song.
+    program[#program + 1] = { loop = { count = 0, to = loopTarget } }
+    return program
   end
 
   local specs = {}
-  for start = 1, #programs, 4 do
-    local used, channels = {}, {}
-    for i = start, math.min(start + 3, #programs) do
-      local kinds = {}
-      for _, event in ipairs(decoded[i].events) do
-        if event.kind == "note" then
-          local kind = toneInfo(voicegroups, vgId, event)
-          kinds[kind] = (kinds[kind] or 0) + 1
-        end
-      end
-      local dominant, best = 1, 0
-      for kind, count in pairs(kinds) do
-        if count > best then dominant, best = kind, count end
-      end
-      channels[#channels + 1] = { hw = roleFor(dominant, used), program = programs[i] }
+  for start = 1, #decoded, 4 do
+    local used, channels, assignments = {}, {}, {}
+    for i = start, math.min(start + 3, #decoded) do
+      local dominant = dominantKind(decoded[i])
+      local hw = roleFor(dominant, used)
+      assignments[#assignments + 1] = { track = decoded[i], dominant = dominant, hw = hw }
+      channels[#channels + 1] = { hw = hw }
+    end
+    local specWaves = {}
+    for index, item in ipairs(assignments) do
+      channels[index].program = buildProgram(item.track, item.hw, specWaves)
+    end
+    local waves = {}
+    for index, wave in ipairs(WAVES) do waves[index] = wave end
+    for _, entry in ipairs(specWaves) do
+      if #waves < 15 then waves[#waves + 1] = entry.wave end
     end
     specs[#specs + 1] = {
-      tempo = 256,
+      tempo = gbTempo(baseTempo),
       channels = channels,
-      waves = WAVES,
+      waves = waves,
       drums = DRUMS,
       engine = 1,
     }
   end
+  -- Extra chips inherit the average pan of the tracks they carry, instead of
+  -- a fixed left/right rotation.  Base stays centered.
+  for specIndex, spec in ipairs(specs) do
+    local panSum, panCount = 0, 0
+    for slot = 1, 4 do
+      local track = decoded[(specIndex - 1) * 4 + slot]
+      if track and track.pan then
+        panSum = panSum + track.pan
+        panCount = panCount + 1
+      end
+    end
+    spec.pan = specIndex == 1 and 0
+      or (panCount > 0 and math.max(-1, math.min(1, panSum / panCount)) or 0)
+  end
   return specs
 end
 
+local audioFile
+
 local function luaTable(version, file)
-  local okCache, CacheFs = pcall(require, "src.import.CacheFs")
-  if not okCache or type(CacheFs) ~= "table" or not CacheFs.readAt then return nil end
-  local okVersion, GameVersion = pcall(require, "src.core.GameVersion")
-  if not okVersion or type(GameVersion) ~= "table" or not GameVersion.cachePrefix then
-    return nil
-  end
-  local bytes = CacheFs.readAt(GameVersion.cachePrefix(version) .. AUDIO_ROOT .. file)
+  local bytes = audioFile(version, file)
   if type(bytes) ~= "string" then return nil end
   local chunk = load(bytes, "@gba/" .. version .. "/" .. file)
   if not chunk then return nil end
@@ -405,14 +788,32 @@ local function luaTable(version, file)
   return result
 end
 
-local function audioFile(version, name)
+audioFile = function(version, name)
   local okCache, CacheFs = pcall(require, "src.import.CacheFs")
   if not okCache or type(CacheFs) ~= "table" or not CacheFs.readAt then return nil end
   local okVersion, GameVersion = pcall(require, "src.core.GameVersion")
   if not okVersion or type(GameVersion) ~= "table" or not GameVersion.cachePrefix then
     return nil
   end
-  return CacheFs.readAt(GameVersion.cachePrefix(version) .. AUDIO_ROOT .. name)
+  M.lastPath = M.lastPath or {}
+  local seen = {}
+  local prefixes = {}
+  local prefix = GameVersion.cachePrefix(version)
+  if type(prefix) == "string" and prefix ~= "" then prefixes[#prefixes + 1] = prefix end
+  prefixes[#prefixes + 1] = tostring(version) .. "/"
+  prefixes[#prefixes + 1] = ""
+  for _, candidate in ipairs(prefixes) do
+    if not seen[candidate] then
+      seen[candidate] = true
+      local rel = candidate .. AUDIO_ROOT .. name
+      local bytes = CacheFs.readAt(rel)
+      if bytes then
+        M.lastPath[version .. ":" .. name] = rel
+        return bytes
+      end
+    end
+  end
+  return nil
 end
 
 local cache = {}
@@ -434,6 +835,16 @@ local function songIds(version)
   return songs
 end
 
+-- FRLG index.lua stores MUS_ jingles as bgm/fanfare/se. All carry playable
+-- M4A track data; only MUS_NONE (or songs with no tracks) should be skipped.
+local MUSIC_KINDS = { bgm = true, fanfare = true, se = true }
+
+local function usableSong(info)
+  return info ~= nil and MUSIC_KINDS[info.kind] == true
+    and (info.tracks or 0) > 0
+end
+M.isPlayableSong = usableSong
+
 function M.availableVersions(versions)
   local out = {}
   for _, entry in ipairs((versions and versions.VERSIONS) or {}) do
@@ -451,7 +862,7 @@ function M.songList(version, labelFilter)
         and (not labelFilter or labelFilter[label]) then
       local info = tableValue(data.index, "songs")
       info = info and (tableValue(info, id) or tableValue(info, tostring(id)))
-      if info and info.kind == "bgm" and (info.tracks or 0) > 0 then
+      if usableSong(info) then
         out[#out + 1] = label
       end
     end
@@ -467,25 +878,31 @@ function M.has(version, label)
   if not id then return false end
   local songs = tableValue(data.index, "songs")
   local info = songs and (tableValue(songs, id) or tableValue(songs, tostring(id)))
-  return info ~= nil and info.kind == "bgm" and (info.tracks or 0) > 0
+  return usableSong(info)
 end
 
 function M.convert(version, label)
+  local function fail(reason)
+    M.lastError = string.format("%s/%s: %s", tostring(version), tostring(label), reason)
+    return nil
+  end
   local data = dataFor(version)
-  if not data then return nil end
+  if not data then return fail("no audio index") end
   local id = songIds(version)[label]
-  if not id then return nil end
+  if not id then return fail("unknown song id") end
   local songs = tableValue(data.index, "songs")
   local info = songs and (tableValue(songs, id) or tableValue(songs, tostring(id)))
-  if not info or info.kind ~= "bgm" or (info.tracks or 0) < 1 then return nil end
+  if not usableSong(info) then return fail("no playable track data") end
   local blob = audioFile(version, "songs/" .. tostring(id) .. ".bin")
-  if type(blob) ~= "string" then return nil end
+  if type(blob) ~= "string" then return fail("missing song bin") end
   local okSeq, Seq = pcall(require, "src.core.game3.m4a_seq")
-  if not okSeq or type(Seq) ~= "table" or not Seq.parseSongBin then return nil end
+  if not okSeq or type(Seq) ~= "table" or not Seq.parseSongBin then
+    return fail("m4a_seq unavailable")
+  end
   local okParse, song = pcall(Seq.parseSongBin, blob)
-  if not okParse or type(song) ~= "table" then return nil end
+  if not okParse or type(song) ~= "table" then return fail("song parse failed") end
   local specs = M.buildSpecs(song, data.voicegroups, info)
-  if not specs or #specs == 0 then return nil end
+  if not specs or #specs == 0 then return fail("no chip specs") end
   local def = specs[1]
   def.generation = 1
   def.g3Mix = true
@@ -495,7 +912,6 @@ function M.convert(version, label)
     local spec = specs[i]
     spec.generation = 1
     spec.g3Mix = true
-    spec.pan = (((i - 2) % 3) - 1) * 0.5
     extra["g3_" .. tostring(i)] = spec
   end
   return { def = def, extra = extra, tracks = song.tracks }

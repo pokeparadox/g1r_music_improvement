@@ -1,4 +1,4 @@
--- Plain Lua asserts for versions.describe and music_menu navigation.
+-- Plain Lua asserts for music_menu navigation.
 -- Run: cd <mod> && luajit tests/music_menu_test.lua
 package.path = "./?.lua;" .. package.path
 local versions = dofile("versions.lua")
@@ -9,51 +9,55 @@ local function eq(actual, expected, label)
     label, tostring(expected), tostring(actual)))
 end
 
--- describe: variants use the source version's generation and canonical name.
 local d = versions.describe("Music_ImprovedPokecenter_gold", 1)
 eq(d.generation, 2, "variant generation")
 eq(d.name, "Pokemon Center", "variant name")
-eq(d.kind, "Improved", "variant kind")
+eq(d.variant, "g2_improved", "guided variant")
+eq(d.label, "G2 (Improved)", "guided label")
 
 d = versions.describe("Music_StockPokemonCenter_red", 2)
-eq(d.generation, 1, "stock generation")
-eq(d.name, "Pokemon Center", "stock name")
-eq(d.kind, "Stock", "stock kind")
+eq(d.variant, "g1", "stock variant")
+eq(d.label, "G1", "stock label")
 
--- plain ids keep the host generation but use the canonical group name.
+d = versions.describe("Music_MixCities1_firered", 1)
+eq(d.variant, "g3_mix", "mix variant")
+eq(d.label, "G3 (Mix)", "mix label")
+
 d = versions.describe("MUS_OAK_LAB", 3)
 eq(d.generation, 3, "native generation")
-eq(d.name, "Oak's Lab", "native name")
 eq(d.kind, nil, "native has no kind")
+eq(d.label, "G3", "native label")
 
-d = versions.describe("Music_Cities1", 1)
-eq(d.generation, 1, "host generation")
-eq(d.name, "Viridian City", "group name")
-
--- music_menu: native first, then STK/IMP per generation, wrapping.
+-- Fixed origin order; LEFT/RIGHT cycles only present variants.
 local entry = {
   name = "Pallet Town",
   nativeId = "Music_PalletTown",
   variants = {
+    { mix = true, version = "firered", generation = 3, id = "M3" },
+    { version = "gold", generation = 2, improved = true, id = "I2" },
     { native = true, generation = 1 },
     { version = "gold", generation = 2, improved = false, id = "S2" },
-    { version = "gold", generation = 2, improved = true, id = "I2" },
-    { version = "crystal", generation = 2, improved = true, id = "I3" },
+    { version = "red", generation = 1, improved = false, id = "S1" },
+    { version = "red", generation = 1, improved = true, id = "I1" },
+    { native = true, generation = 3, id = "N3" },
   },
 }
-eq(menu.rightText(entry.variants[1]), "G1", "native label")
-eq(menu.rightText(entry.variants[2]), "G2 STK", "stock label")
-eq(menu.rightText(entry.variants[3]), "G2 IMP", "improved label")
-eq(#menu.versionKeys(entry), 2, "version slots")
+eq(menu.rightText(entry.variants[1]), "G3 (Mix)", "mix label")
+eq(menu.rightText(entry.variants[2]), "G2 (Improved)", "g2 guided label")
+eq(menu.rightText(entry.variants[3]), "G1", "g1 stock label")
+eq(menu.rightText(entry.variants[4]), "G2", "g2 stock label")
+eq(menu.rightText(entry.variants[5]), "G1", "g1 stock label dup")
+eq(menu.rightText(entry.variants[6]), "G1 (Improved)", "g1 guided label")
 
-eq(menu.select(entry, "1", true).native, true, "native slot")
-eq(menu.select(entry, "2", true).id, "I2", "improved pick")
-eq(menu.select(entry, "2", false).id, "S2", "stock pick")
+local keys = menu.versionKeys(entry)
+eq(#keys, 6, "version slots")
+eq(table.concat(keys, ","), "g1,g1_improved,g2,g2_improved,g3,g3_mix", "menu order")
 
-eq(menu.cycle(entry, "1", 1, true).version, "gold", "cycle forward")
-eq(menu.cycle(entry, "1", -1, true).version, "gold", "cycle wraps back")
-eq(menu.cycle(entry, "2", 1, true).native, true, "cycle wraps forward")
-eq(menu.title(true), "MUSIC TEST [IMP]", "improved title")
-eq(menu.title(false), "MUSIC TEST [STK]", "stock title")
+eq(menu.select(entry, "g3_mix").id, "M3", "mix slot")
+eq(menu.select(entry, "g1").native, true, "native slot")
+eq(menu.cycle(entry, "g1", 1).id, "I1", "cycle forward")
+eq(menu.cycle(entry, "g3_mix", 1).native, true, "cycle wraps forward")
+eq(menu.cycle(entry, "g1", -1).id, "M3", "cycle wraps back")
+eq(menu.title(), "MUSIC TEST", "title")
 
 print("music_menu ok")

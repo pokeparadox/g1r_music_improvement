@@ -21,9 +21,8 @@ function M.install(deps)
   local originalUpdate = Audio.update
   local originalStopAll = Audio.stopAll
   local chip = { id = nil, nativeId = nil, record = nil, paused = false }
-  local pending = nil   -- { nativeId, id, settings, candidate }
+  local pending = nil   -- { nativeId, id, settings, candidates }
   local lastPick = {}
-  local chosen = {}     -- nativeId -> { source=..., candidate=... }
 
   local function nativeLabel(id)
     local ok, name = pcall(Song.nameOf, id, version)
@@ -54,30 +53,18 @@ function M.install(deps)
     chip.id, chip.nativeId, chip.record, chip.paused = nil, nil, nil, false
   end
 
-  local function candidateFor(nativeId, settings)
-    -- Shuffle must roll again for every fresh playSong, so do not reuse a
-    -- cached pick in that mode.
-    local isShuffle = tostring(settings.source or ""):match("^shuffle_") ~= nil
-    if not isShuffle then
-      local cached = chosen[nativeId]
-      if cached and cached.source == settings.source then
-        return cached.candidate
+  local function recordsFor(nativeId, settings)
+    local records = {}
+    for _, candidate in ipairs(deps.candidatesFor(nativeId, settings)) do
+      for _, enabled in ipairs(deps.enabledListFor and deps.enabledListFor()
+          or { true, false }) do
+        if not candidate.mix or enabled then
+          local rec = deps.loadVariant(nativeId, candidate, { enabled = enabled })
+          if rec then records[#records + 1] = rec end
+        end
       end
     end
-    local candidates = deps.candidatesFor(nativeId, settings)
-    if #candidates == 0 then
-      chosen[nativeId] = nil
-      return nil
-    end
-    local candidate = deps.versions.pick(settings.source, candidates,
-      lastPick[nativeId])
-    if candidate then
-      chosen[nativeId] = { source = settings.source, candidate = candidate }
-      lastPick[nativeId] = candidate.version .. ":" .. candidate.label
-    else
-      chosen[nativeId] = nil
-    end
-    return candidate
+    return records
   end
 
   local function startChip(id, nativeId, record)
@@ -163,12 +150,10 @@ function M.install(deps)
       return originalPlay(id, opts)
     end
     local settings = deps.currentSettings()
-    if settings.source == "native" or settings.source == "gen3" then
+    if not settings.enabled then
       pending = nil
       if chip.id then resetBus() end
-      if deps.toast then
-        pcall(deps.toast, nativeId)
-      end
+      if deps.toast then pcall(deps.toast, nativeLabel(resolved)) end
       return originalPlay(id, opts)
     end
     -- Same variant already playing: do nothing.
@@ -179,70 +164,51 @@ function M.install(deps)
     if pending and pending.id == resolved and not opts.restart then
       return true
     end
-    local candidate = candidateFor(nativeId, settings)
-    if not candidate then
+    local candidates = deps.candidatesFor(nativeId, settings)
+    if #candidates == 0 then
       pending = nil
       if chip.id then resetBus() end
       if deps.debug then pcall(deps.debug, "no alt for " .. nativeId) end
       return originalPlay(id, opts)
     end
-    local enabledList = deps.enabledListFor
-      and deps.enabledListFor(settings.source, settings.enabled)
-      or { settings.enabled ~= false }
     local records = {}
-    for _, enabled in ipairs(enabledList) do
-      local s2 = { enabled = enabled, source = settings.source }
-      local rec = deps.loadVariant(nativeId, candidate, s2)
+    for _, rec in ipairs(recordsFor(nativeId, settings)) do
       -- Do not translate on the audio thread; uncached variants are prepared
       -- in the background (Audio.update) and used on the next playSong.
-      if rec then records[#records + 1] = rec end
+      records[#records + 1] = rec
     end
-    -- Filter by shuffle mode.
-    local eligible = deps.versions.eligible(settings.source, records)
-    -- shuffle_all also rotates the native GBA version.
-    if settings.source == "shuffle_all" then
-      eligible[#eligible + 1] = { native = true, key = "native:" .. tostring(nativeId) }
-    end
-    local record = nil
-    if #eligible > 0 then
-      local picked = deps.versions.pick(settings.source, eligible,
-        lastPick[nativeId])
-      if picked then
-        record = picked
-        lastPick[nativeId] = picked.key
-      else
-        record = eligible[1]
-        lastPick[nativeId] = record.key
-      end
-    end
-    if record and record.native then
+    local eligible = deps.versions.filterEnabled(records, settings.alt)
+    if #eligible == 0 then
       pending = nil
       if chip.id then resetBus() end
       if deps.toast then pcall(deps.toast, nativeLabel(resolved)) end
       return originalPlay(id, opts)
     end
-    if record then
-      resetBus()
-      pending = nil
-      local ok = startChip(resolved, nativeId, record)
-      if not ok then
-        if deps.debug then pcall(deps.debug, "start fail for " .. nativeId) end
-        return originalPlay(id, opts)
-      end
-      return true
+    local record
+    if settings.shuffle then
+      record = deps.versions.pick("shuffle_all", eligible, lastPick[nativeId])
+    else
+      record = deps.versions.sortByQuality(eligible, 3)[1]
     end
-    if deps.debug then pcall(deps.debug, "prep fail for " .. nativeId) end
+    if not record then
+      pending = nil
+      if chip.id then resetBus() end
+      return originalPlay(id, opts)
+    end
+    if record.key then lastPick[nativeId] = record.key end
+    resetBus()
+    pending = nil
+    if startChip(resolved, nativeId, record) then return true end
+    if deps.debug then pcall(deps.debug, "start fail for " .. nativeId) end
     -- Missing variant: play native now and prepare in the background.
     pending = {
       nativeId = nativeId,
       id = resolved,
       settings = settings,
-      candidate = candidate,
+      candidates = candidates,
     }
     if chip.id then resetBus() end
-    if deps.toast then
-      pcall(deps.toast, nativeLabel(resolved))
-    end
+    if deps.toast then pcall(deps.toast, nativeLabel(resolved)) end
     return originalPlay(id, opts)
   end
 
@@ -294,12 +260,13 @@ function M.install(deps)
       if not pending.busy then
         pending.busy = true
         local ok = pcall(function()
-          local enabledList = deps.enabledListFor
-            and deps.enabledListFor(pending.settings.source, pending.settings.enabled)
-            or { pending.settings.enabled ~= false }
-          for _, enabled in ipairs(enabledList) do
-            local s2 = { enabled = enabled, source = pending.settings.source }
-            deps.ensureVariant(pending.nativeId, pending.candidate, s2)
+          for _, candidate in ipairs(pending.candidates or {}) do
+            for _, enabled in ipairs(deps.enabledListFor and deps.enabledListFor()
+                or { true, false }) do
+              if not candidate.mix or enabled then
+                deps.ensureVariant(pending.nativeId, candidate, { enabled = enabled })
+              end
+            end
           end
         end)
         pending.busy = false

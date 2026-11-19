@@ -62,9 +62,9 @@ M.EQUIVALENTS = {
     name = "Wild Battle" },
   { gen1 = "Music_FinalBattle", gen2 = "Music_ChampionBattle", gen3 = "MUS_VS_CHAMPION",
     name = "Champion Battle" },
-  { gen1 = "Music_MeetRival", gen2 = "Music_RivalBattle", gen3 = "MUS_ENCOUNTER_RIVAL",
+  { gen1 = "Music_MeetRival", gen2 = "Music_LookRival", gen3 = "MUS_ENCOUNTER_RIVAL",
     name = "Rival Encounter" },
-  { gen1 = "Music_TrainerBattle", gen2 = "Music_RocketBattle",
+  { gen1 = "Music_TrainerBattle", gen2 = "Music_RocketBattle", gen3 = "MUS_VS_TRAINER",
     name = "Team Rocket Battle" },
   { gen1 = "Music_MeetEvilTrainer", gen2 = "Music_LookRocket", gen3 = "MUS_ENCOUNTER_ROCKET",
     name = "Team Rocket Encounter" },
@@ -179,19 +179,30 @@ function M.describe(id, hostGeneration)
     local source = M.BY_ID[version]
     if source then generation = source.generation end
     local label = (kind == "Mix" and "MUS_" or "Music_") .. base
+    local variant = kind == "Mix" and "g3_mix"
+      or ("g" .. tostring(generation) .. (kind == "Improved" and "_improved" or ""))
     return {
       generation = generation,
       name = M.nameFor(label),
       kind = kind == "Improved" and "Improved"
         or kind == "Stock" and "Stock" or "Mix",
       mix = kind == "Mix",
+      variant = variant,
+      label = M.variantLabel(variant),
     }
   end
   local group = M.byLabel[raw]
   if group then
-    return { generation = generation, name = group.name or M.pretty(raw) }
+    return {
+      generation = generation, name = group.name or M.pretty(raw),
+      variant = "g" .. tostring(generation),
+      label = M.variantLabel("g" .. tostring(generation)),
+    }
   end
-  return { generation = generation, name = M.pretty(raw) }
+  return {
+    generation = generation, name = M.pretty(raw),
+    variant = "native", label = M.variantLabel("native"),
+  }
 end
 
 -- `available(version, label)` filters to imported datasets that actually carry
@@ -260,6 +271,101 @@ end
 
 -- Deterministic when `rng` is supplied (tests); otherwise avoid repeating the
 -- previous pick for this native song when more than one candidate exists.
+-- Variant taxonomy shared by menu, toast and settings.  IDs stay unchanged;
+-- "guided" is the existing Music_Improved translation using song profiles.
+M.VARIANT_KINDS = {
+  { key = "g1", label = "G1" },
+  { key = "g1_improved", label = "G1 (Improved)" },
+  { key = "g2", label = "G2" },
+  { key = "g2_improved", label = "G2 (Improved)" },
+  { key = "g3", label = "G3" },
+  { key = "g3_mix", label = "G3 (Mix)" },
+}
+M.MENU_KINDS = M.VARIANT_KINDS
+M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix" }
+
+local VARIANT_LABELS = {}
+for _, item in ipairs(M.VARIANT_KINDS) do VARIANT_LABELS[item.key] = item.label end
+-- Legacy names from the previous taxonomy; keep old saves/options readable.
+for key, label in pairs({
+  native = "G1", g1_stock = "G1", g1_guided = "G1 (Improved)",
+  g2_stock = "G2", g2_guided = "G2 (Improved)",
+}) do VARIANT_LABELS[key] = label end
+
+function M.variantKind(value)
+  if type(value) == "string" then
+    if VARIANT_LABELS[value] and not tostring(value):match("^Music_") then
+      return value
+    end
+    value = { id = value }
+  end
+  if type(value) ~= "table" then return "g1" end
+  local id = tostring(value.id or "")
+  if value.mix or (value.candidate and value.candidate.mix)
+      or id:match("^Music_Mix") then
+    return "g3_mix"
+  end
+  -- Variant IDs end in their source version.  Trust that over the host
+  -- generation stored on the record: a Gold track heard in Red is still G2.
+  local generation
+  local version = id:match("_([%w]+)$")
+  local source = version and M.BY_ID[version]
+  if source then generation = source.generation end
+  if not generation then
+    version = value.version or (value.candidate and value.candidate.version)
+    source = version and M.BY_ID[version]
+    generation = source and source.generation
+  end
+  if not generation then generation = value.generation
+      or (value.candidate and value.candidate.generation) end
+  generation = tonumber(generation) or 1
+  if generation > 3 then generation = 3 end
+  local improved = value.improved
+  if improved == nil then improved = id:match("^Music_Improved") ~= nil end
+  return "g" .. generation .. (improved and "_improved" or "")
+end
+
+function M.variantLabel(value)
+  local key = type(value) == "string" and value or M.variantKind(value)
+  if VARIANT_LABELS[key] then return VARIANT_LABELS[key] end
+  return VARIANT_LABELS[M.variantKind(value)] or string.upper(tostring(key))
+end
+
+-- Lower rank is higher perceived quality; host generation wins ties.
+-- Menu order stays origin-first; shuffle-off preference still puts mixes first.
+function M.qualityRank(kind, hostGeneration)
+  local canonical = M.variantKind(kind)
+  -- Native G3 is the real arrangement; G3 Mix is the backport approximation.
+  if canonical == "g3" then return 0, tonumber(hostGeneration) == 3 and 0 or 1 end
+  if canonical == "g3_mix" then return 1, 0 end
+  local generation = tonumber(tostring(canonical):match("^g(%d)")) or 1
+  local tier = tostring(canonical):match("improved") and 2 or 3
+  return tier, generation == tonumber(hostGeneration) and 0 or 1
+end
+
+function M.sortByQuality(records, hostGeneration)
+  local out = {}
+  for _, record in ipairs(records or {}) do out[#out + 1] = record end
+  table.sort(out, function(a, b)
+    local ak, bk = M.variantKind(a), M.variantKind(b)
+    local at, ah = M.qualityRank(ak, hostGeneration)
+    local bt, bh = M.qualityRank(bk, hostGeneration)
+    if at ~= bt then return at < bt end
+    if ah ~= bh then return ah < bh end
+    return ak < bk
+  end)
+  return out
+end
+
+function M.filterEnabled(records, enabled)
+  local out = {}
+  for _, record in ipairs(records or {}) do
+    local kind = M.variantKind(record)
+    if not enabled or enabled[kind] ~= false then out[#out + 1] = record end
+  end
+  return out
+end
+
 function M.pick(mode, candidates, lastKey, rng)
   if mode == "native" or mode == "gen3" then return nil end
   local generation = M.generationForMode(mode)

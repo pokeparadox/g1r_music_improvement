@@ -124,4 +124,40 @@ function M.openList(game, opts)
   return menu
 end
 
+-- Non-interactive modal used while the startup cache is being generated.
+-- Gen3 has no game.stack, so the normal MusicImprovementProgress screen
+-- cannot be pushed; this rides the game3 stack instead.
+function M.openProgress(game, textFn)
+  local ok, Stack = pcall(require, "src.ui.game3.stack")
+  if not ok or type(Stack) ~= "table" then return nil end
+  local menu = {
+    isMenu = true,
+    title = "PREPARING MUSIC",
+    progress = 0,
+    total = 0,
+  }
+  function menu.draw()
+    local G = love.graphics
+    G.push("all")
+    G.setColor(0, 0, 0, 0.9)
+    G.rectangle("fill", 0, 0, G.getWidth(), G.getHeight())
+    G.setColor(1, 1, 1, 1)
+    G.print(menu.title, 8, 8)
+    local text = textFn and textFn(menu) or string.format("%d / %d",
+      menu.progress or 0, menu.total or 0)
+    G.print(tostring(text), 8, 24)
+    G.pop()
+  end
+  function menu.handleInput() end
+  Stack.push(LAYER, menu, { hideBelow = true, fullscreen = true })
+  return menu
+end
+
+function M.close()
+  local ok, Stack = pcall(require, "src.ui.game3.stack")
+  if ok and type(Stack) == "table" and type(Stack.pop) == "function" then
+    pcall(Stack.pop, LAYER)
+  end
+end
+
 return M
