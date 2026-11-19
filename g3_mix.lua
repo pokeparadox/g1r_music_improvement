@@ -28,6 +28,81 @@ function M.clockAt(index)
   return CLOCK[index] or index
 end
 
+-- Local copy of the engine's M4A header parser. Engine game3 modules are
+-- sandbox-denied on Gen1/Gen2 hosts, so conversion cannot require them.
+local function u8(blob, off)
+  if off < 0 or off >= #blob then return nil end
+  return blob:byte(off + 1)
+end
+
+local function u32le(blob, off)
+  local b0 = u8(blob, off)
+  if not b0 then return nil end
+  return b0 + (u8(blob, off + 1) or 0) * 256
+    + (u8(blob, off + 2) or 0) * 65536
+    + (u8(blob, off + 3) or 0) * 16777216
+end
+
+local function parseSongBin(blob)
+  if type(blob) ~= "string" or #blob < 8 then return nil end
+  local tracks = u8(blob, 0) or 0
+  if tracks > 16 then tracks = 0 end
+  local out = {
+    tracks = tracks,
+    blocks = u8(blob, 1),
+    priority = u8(blob, 2),
+    reverb = u8(blob, 3),
+    voicegroup = u32le(blob, 4),
+    trackData = {},
+    trackEntries = {},
+  }
+  if tracks == 0 then return out end
+
+  local first = u32le(blob, 8) or 0
+  local packed = first > 0 and first < #blob and first < 0x01000000
+  if packed then
+    local stride = (out.blocks or 0) >= 128 and 12 or 8
+    out.blocks = (out.blocks or 0) % 128
+    for t = 0, tracks - 1 do
+      local base = 8 + t * stride
+      local off = u32le(blob, base) or 0
+      local len = u32le(blob, base + 4) or 0
+      if off > 0 and len > 0 and off + len <= #blob then
+        out.trackData[t + 1] = blob:sub(off + 1, off + len)
+        out.trackEntries[t + 1] = stride == 12 and (u32le(blob, base + 8) or 0) or 0
+      else
+        out.trackData[t + 1] = ""
+      end
+    end
+    return out
+  end
+
+  local headerSize = 8 + tracks * 4
+  local ptrs = {}
+  for t = 0, tracks - 1 do
+    ptrs[#ptrs + 1] = { idx = t, ptr = u32le(blob, 8 + t * 4) or 0 }
+  end
+  table.sort(ptrs, function(a, b) return a.ptr < b.ptr end)
+  local cursor = headerSize
+  local packedOff = {}
+  for i, p in ipairs(ptrs) do
+    local remainTracks = #ptrs - i + 1
+    local remainBytes = #blob - cursor
+    local approx = math.floor(remainBytes / remainTracks)
+    if ptrs[i + 1] and p.ptr > 0 and ptrs[i + 1].ptr > p.ptr then
+      approx = math.min(approx, ptrs[i + 1].ptr - p.ptr)
+    end
+    approx = math.max(16, math.min(approx, remainBytes))
+    packedOff[p.idx] = { off = cursor, len = approx }
+    cursor = cursor + approx
+  end
+  for t = 0, tracks - 1 do
+    local p = packedOff[t]
+    out.trackData[t + 1] = p and blob:sub(p.off + 1, p.off + p.len) or ""
+  end
+  return out
+end
+
 function M.decodeTrack(data)
   if type(data) ~= "string" or #data == 0 then return { events = {} } end
   local events = {}
@@ -827,7 +902,18 @@ local function dataFor(version)
   return data
 end
 
+-- Static map injected by main.lua. Engine game3 modules are sandbox-denied on
+-- Gen1/Gen2 hosts, so the map is the only reliable source there.
+local songIdMap
+function M.setSongIds(map)
+  if type(map) == "table" then songIdMap = map end
+end
+
 local function songIds(version)
+  if songIdMap then
+    local map = songIdMap[version]
+    if type(map) == "table" then return map end
+  end
   local ok, Song = pcall(require, "src.core.game3.song_ids")
   if not ok or type(Song) ~= "table" or not Song.forVersion then return {} end
   local okSongs, songs = pcall(Song.forVersion, version)
@@ -895,11 +981,7 @@ function M.convert(version, label)
   if not usableSong(info) then return fail("no playable track data") end
   local blob = audioFile(version, "songs/" .. tostring(id) .. ".bin")
   if type(blob) ~= "string" then return fail("missing song bin") end
-  local okSeq, Seq = pcall(require, "src.core.game3.m4a_seq")
-  if not okSeq or type(Seq) ~= "table" or not Seq.parseSongBin then
-    return fail("m4a_seq unavailable")
-  end
-  local okParse, song = pcall(Seq.parseSongBin, blob)
+  local okParse, song = pcall(parseSongBin, blob)
   if not okParse or type(song) ~= "table" then return fail("song parse failed") end
   local specs = M.buildSpecs(song, data.voicegroups, info)
   if not specs or #specs == 0 then return fail("no chip specs") end

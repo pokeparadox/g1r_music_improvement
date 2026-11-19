@@ -369,4 +369,45 @@ for _, event in ipairs(envelopeSpec.channels[1].program) do
 end
 eq(envelopeFade, -1, "index voicegroupId selects instrument envelope")
 
+-- Gen1/Gen2 hosts deny engine game3 modules. Conversion still works with the
+-- static song map and local M4A header parser.
+local function u32(n)
+  return string.char(n % 256, math.floor(n / 256) % 256,
+    math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
+end
+local offlineTrack = string.char(0xBD, 0x01, 0xD3, 60, 100, 0xB1)
+local offlineBlob = string.char(1, 0, 0, 0, 0, 0, 0, 0)
+  .. u32(16) .. u32(#offlineTrack) .. offlineTrack .. string.rep("\0", 6)
+local offlineFiles = {
+  ["index.lua"] = "return { songs = { [99] = { kind = 'bgm', tracks = 1, voicegroupId = 1 } } }",
+  ["voicegroups.lua"] = "return { [1] = { [1] = { type = 1, attack = 0, decay = 0, sustain = 15, release = 0 } } }",
+  ["songs/99.bin"] = offlineBlob,
+}
+package.loaded["src.import.CacheFs"] = {
+  readAt = function(rel)
+    rel = tostring(rel)
+    for suffix, body in pairs(offlineFiles) do
+      if rel:sub(-#suffix) == suffix then return body end
+    end
+    return nil
+  end,
+}
+mix.setSongIds({ firered = { MUS_OFFLINE_TEST = 99 } })
+local realRequire = require
+_G.require = function(name, ...)
+  if tostring(name):match("^src%.core%.game3%.") then
+    error("game3 modules denied on this host", 0)
+  end
+  return realRequire(name, ...)
+end
+assert(mix.has("firered", "MUS_OFFLINE_TEST"), "static song map resolves labels")
+local offline = mix.convert("firered", "MUS_OFFLINE_TEST")
+_G.require = realRequire
+assert(offline, "conversion works without engine game3 modules: " .. tostring(mix.lastError))
+local offlineNotes = 0
+for _, event in ipairs(offline.def.channels[1].program) do
+  if event.pitch then offlineNotes = offlineNotes + 1 end
+end
+assert(offlineNotes > 0, "local M4A parser keeps notes")
+
 print("g3_mix ok")

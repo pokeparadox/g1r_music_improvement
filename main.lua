@@ -54,6 +54,10 @@ return function(mod)
   local musicMenu = loadModFile("music_menu.lua")
   if musicMenu and musicMenu.setVersions then musicMenu.setVersions(versions) end
   local g3Mix = loadModFile("g3_mix.lua")
+  local g3SongIds = loadModFile("g3_song_ids.lua")
+  if g3Mix and g3Mix.setSongIds and g3SongIds then
+    g3Mix.setSongIds(g3SongIds)
+  end
   local mixEnabled
   local mixCandidatesFor
   local mixSongList
