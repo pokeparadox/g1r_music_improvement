@@ -275,11 +275,11 @@ end
 -- "guided" is the existing Music_Improved translation using song profiles.
 M.VARIANT_KINDS = {
   { key = "g1", label = "G1" },
-  { key = "g1_improved", label = "G1 (Improved)" },
+  { key = "g1_improved", label = "G1+" },
   { key = "g2", label = "G2" },
-  { key = "g2_improved", label = "G2 (Improved)" },
+  { key = "g2_improved", label = "G2+" },
   { key = "g3", label = "G3" },
-  { key = "g3_mix", label = "G3 (Mix)" },
+  { key = "g3_mix", label = "G3 Mix" },
 }
 M.MENU_KINDS = M.VARIANT_KINDS
 M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix" }
@@ -288,8 +288,8 @@ local VARIANT_LABELS = {}
 for _, item in ipairs(M.VARIANT_KINDS) do VARIANT_LABELS[item.key] = item.label end
 -- Legacy names from the previous taxonomy; keep old saves/options readable.
 for key, label in pairs({
-  native = "G1", g1_stock = "G1", g1_guided = "G1 (Improved)",
-  g2_stock = "G2", g2_guided = "G2 (Improved)",
+  native = "G1", g1_stock = "G1", g1_guided = "G1+",
+  g2_stock = "G2", g2_guided = "G2+",
 }) do VARIANT_LABELS[key] = label end
 
 function M.variantKind(value)

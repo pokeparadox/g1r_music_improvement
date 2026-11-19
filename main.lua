@@ -636,13 +636,13 @@ return function(mod)
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g1_stock", type = "toggle", label = "G1", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "alt_g1_guided", type = "toggle", label = "G1 (Improved)", default = true,
+    { key = "alt_g1_guided", type = "toggle", label = "G1+", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g2_stock", type = "toggle", label = "G2", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "alt_g2_guided", type = "toggle", label = "G2 (Improved)", default = true,
+    { key = "alt_g2_guided", type = "toggle", label = "G2+", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "alt_g3_mix", type = "toggle", label = "G3 (Mix)", default = true,
+    { key = "alt_g3_mix", type = "toggle", label = "G3 Mix", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
       default = 7, min = 0, max = 7, step = 1 },
@@ -1836,10 +1836,10 @@ return function(mod)
     }
     local toggles = {
       { "alt_g1_stock", "G1" },
-      { "alt_g1_guided", "G1 (Improved)" },
+      { "alt_g1_guided", "G1+" },
       { "alt_g2_stock", "G2" },
-      { "alt_g2_guided", "G2 (Improved)" },
-      { "alt_g3_mix", "G3 (Mix)" },
+      { "alt_g2_guided", "G2+" },
+      { "alt_g3_mix", "G3 Mix" },
       { "shuffle", "SHUFFLE" },
     }
     for _, spec in ipairs(toggles) do
