@@ -13,7 +13,7 @@ local d = versions.describe("Music_ImprovedPokecenter_gold", 1)
 eq(d.generation, 2, "variant generation")
 eq(d.name, "Pokemon Center", "variant name")
 eq(d.variant, "g2_improved", "guided variant")
-eq(d.label, "G2+", "guided label")
+eq(d.label, "G2E", "guided label")
 
 d = versions.describe("Music_StockPokemonCenter_red", 2)
 eq(d.variant, "g1", "stock variant")
@@ -43,11 +43,11 @@ local entry = {
   },
 }
 eq(menu.rightText(entry.variants[1]), "G3 Mix", "mix label")
-eq(menu.rightText(entry.variants[2]), "G2+", "g2 guided label")
+eq(menu.rightText(entry.variants[2]), "G2E", "g2 guided label")
 eq(menu.rightText(entry.variants[3]), "G1", "g1 stock label")
 eq(menu.rightText(entry.variants[4]), "G2", "g2 stock label")
 eq(menu.rightText(entry.variants[5]), "G1", "g1 stock label dup")
-eq(menu.rightText(entry.variants[6]), "G1+", "g1 guided label")
+eq(menu.rightText(entry.variants[6]), "G1E", "g1 guided label")
 
 local keys = menu.versionKeys(entry)
 eq(#keys, 6, "version slots")

@@ -27,9 +27,16 @@ assert(V.variantKind({ id = "Music_StockCities1_red", generation = 1 }) == "g1")
 assert(V.variantKind({ id = "MUS_CITIES1", generation = 3, native = true }) == "g3")
 assert(V.variantKind("Music_MixCities1_firered") == "g3_mix")
 assert(V.variantLabel("g1") == "G1")
-assert(V.variantLabel("g2_improved") == "G2+")
+assert(V.variantLabel("g2_improved") == "G2E")
 assert(V.variantLabel({ id = "Music_MixCities1_firered" }) == "G3 Mix")
 assert(V.variantLabel({ native = true, generation = 3 }) == "G3")
+
+-- G3 Mix title exists on RBY but clashes with GSC title screen.
+assert(not V.mixAllowed(nil, 2), "GBA-only labels skip Mix on Gen2")
+assert(V.mixAllowed(V.byLabel.Music_TitleScreen, 1), "RBY keeps Mix title")
+assert(not V.mixAllowed(V.byLabel.Music_TitleScreen, 2), "GSC skips Mix title")
+assert(V.mixAllowed(V.byLabel.Music_PalletTown, 2), "mapped GSC songs keep Mix")
+assert(V.mixAllowed(V.byLabel.Music_KantoGymBattle, 2), "GSC Kanto tracks keep Mix")
 
 local d = V.describe("Music_MixCities1_firered", 1)
 assert(d.generation == 3 and d.kind == "Mix" and d.mix)

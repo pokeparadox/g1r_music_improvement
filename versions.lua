@@ -244,6 +244,14 @@ function M.candidates(label, hostGeneration, hostVersion, available, includeGen3
   return out
 end
 
+-- G3 Mix on Gen1/Gen2 only when group has native equivalent for that host.
+-- GSC's Kanto tracks have gen2 keys and stay eligible; Title Screen has no
+-- gen2 key, so FR/LG mix must not replace the GSC title screen.
+function M.mixAllowed(group, hostGeneration)
+  if hostGeneration == 3 then return true end
+  return group ~= nil and group["gen" .. hostGeneration] ~= nil
+end
+
 -- Keep only records matching the shuffle mode's variant kind.  Other modes
 -- (shuffle_all, gen1, gen2, ...) pass everything through.
 function M.eligible(mode, records)
@@ -275,9 +283,9 @@ end
 -- "guided" is the existing Music_Improved translation using song profiles.
 M.VARIANT_KINDS = {
   { key = "g1", label = "G1" },
-  { key = "g1_improved", label = "G1+" },
+  { key = "g1_improved", label = "G1E" },
   { key = "g2", label = "G2" },
-  { key = "g2_improved", label = "G2+" },
+  { key = "g2_improved", label = "G2E" },
   { key = "g3", label = "G3" },
   { key = "g3_mix", label = "G3 Mix" },
 }
@@ -288,8 +296,8 @@ local VARIANT_LABELS = {}
 for _, item in ipairs(M.VARIANT_KINDS) do VARIANT_LABELS[item.key] = item.label end
 -- Legacy names from the previous taxonomy; keep old saves/options readable.
 for key, label in pairs({
-  native = "G1", g1_stock = "G1", g1_guided = "G1+",
-  g2_stock = "G2", g2_guided = "G2+",
+  native = "G1", g1_stock = "G1", g1_guided = "G1E",
+  g2_stock = "G2", g2_guided = "G2E",
 }) do VARIANT_LABELS[key] = label end
 
 function M.variantKind(value)

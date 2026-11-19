@@ -636,11 +636,11 @@ return function(mod)
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g1_stock", type = "toggle", label = "G1", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "alt_g1_guided", type = "toggle", label = "G1+", default = true,
+    { key = "alt_g1_guided", type = "toggle", label = "G1E", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g2_stock", type = "toggle", label = "G2", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
-    { key = "alt_g2_guided", type = "toggle", label = "G2+", default = true,
+    { key = "alt_g2_guided", type = "toggle", label = "G2E", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g3_mix", type = "toggle", label = "G3 Mix", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
@@ -900,7 +900,7 @@ return function(mod)
       local group = versions.byLabel[nativeId]
       local label = group and group.gen3
         or (tostring(nativeId):match("^MUS_") and nativeId or nil)
-      if label then
+      if label and versions.mixAllowed(group, hostGeneration) then
         for _, candidate in ipairs(mixCandidatesFor(label)) do
           list[#list + 1] = candidate
         end
@@ -1335,7 +1335,8 @@ return function(mod)
       for _, label in ipairs(mixSongList()) do
         local nativeId = mixNative[label]
           or (tostring(label):match("^MUS_") and label or nil)
-        if nativeId and not variantSeen[nativeId] then
+        if nativeId and versions.mixAllowed(versions.byLabel[tostring(label)], hostGeneration)
+          and not variantSeen[nativeId] then
           variantSeen[nativeId] = true
           variantIds[#variantIds + 1] = nativeId
         end
@@ -1836,9 +1837,9 @@ return function(mod)
     }
     local toggles = {
       { "alt_g1_stock", "G1" },
-      { "alt_g1_guided", "G1+" },
+      { "alt_g1_guided", "G1E" },
       { "alt_g2_stock", "G2" },
-      { "alt_g2_guided", "G2+" },
+      { "alt_g2_guided", "G2E" },
       { "alt_g3_mix", "G3 Mix" },
       { "shuffle", "SHUFFLE" },
     }
@@ -2122,7 +2123,7 @@ return function(mod)
     for _, label in ipairs(mixSongList()) do
       local group = versions.byLabel[label]
       local nativeId = (group and group["gen" .. hostGen]) or label
-      if not seen[nativeId] then
+      if versions.mixAllowed(group, hostGen) and not seen[nativeId] then
         local variants = {}
         for _, record in ipairs(variantMap[nativeId] or {}) do
           if record.mix and record.id then

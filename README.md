@@ -64,15 +64,15 @@ This keeps the enhanced soundtrack consistent with the game's original audio arc
 ### 🎼 Music Testing
 Includes a music testing/jukebox screen that allows available music tracks to be selected and played directly.
 
-- Lists each unique song once, with all available variations: `G1`, `G1+`, `G2`, `G2+`, `G3`, `G3 Mix`.
+- Lists each unique song once, with all available variations: `G1`, `G1E`, `G2`, `G2E`, `G3`, `G3 Mix`.
 - **LEFT/RIGHT** cycles variations in that order; **A** plays; **B** exits.
 - G3 native appears only on Gen3 hosts; G3 Mix appears on every host.
 - Music test previews every available variation; settings toggles affect automatic playback only.
-- Toasts announce the active variation as `<Song> — <LABEL>` (e.g. `Route 1 — G2+`).
+- Toasts announce the active variation as `<Song> — <LABEL>` (e.g. `Route 1 — G2E`).
 
 ### 🔀 Cross-Version Sourcing
 - Any Gen1 or Gen2 song can be sourced from another Gen1/Gen2 version (red, blue, yellow, gold, silver, crystal) for its improved arrangement.
-- Automatic playback uses `SHUFFLE` plus per-kind toggles (`G1`, `G1+`, `G2`, `G2+`, `G3 Mix`); labels follow the source version, not the host. With shuffle off, highest quality available wins: native `G3` on Gen3 hosts → `G3 Mix` → Improved → stock, with host generation first inside each tier.
+- Automatic playback uses `SHUFFLE` plus per-kind toggles (`G1`, `G1E`, `G2`, `G2E`, `G3 Mix`); labels follow the source version, not the host. With shuffle off, highest quality available wins: native `G3` on Gen3 hosts → `G3 Mix` → Improved → stock, with host generation first inside each tier.
 
 ### 🎮 Gen3 (FRLG) Support
 - Gen3 audio is native-only (GBA) but can make use of Gen1/Gen2 chip arrangements.
