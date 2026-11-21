@@ -5,6 +5,7 @@
 local M = {}
 
 local VISIBLE = 8
+local VIEW_W, VIEW_H = 240, 160
 local LAYER = "music_improvement_menu"
 
 local function font()
@@ -63,7 +64,7 @@ function M.openList(game, opts)
     local G = love.graphics
     G.push("all")
     G.setColor(0, 0, 0, 0.85)
-    G.rectangle("fill", 0, 0, G.getWidth(), G.getHeight())
+    G.rectangle("fill", 0, 0, VIEW_W, VIEW_H)
     drawText(menu.title, 8, 6)
     for row = 1, VISIBLE do
       local i = menu.scroll + row
@@ -74,15 +75,17 @@ function M.openList(game, opts)
       local y = 22 + (row - 1) * 14
       drawText((selected and "> " or "  ") .. tostring(item.label or item), 8, y, colors)
       if item.right then
-        drawText(item.right, G.getWidth() - 8 - textWidth(item.right), y)
+        drawText(item.right, VIEW_W - 8 - textWidth(item.right), y)
       end
     end
     if menu.hint then
       local lines = type(menu.hint) == "table" and menu.hint or { menu.hint }
-      local y = G.getHeight() - 6 - (#lines - 1) * 10
+      local pitch = F and F.linePitch and F.linePitch() or 12
+      local glyphHeight = F and F.GLYPH_HEIGHT or 12
+      local y = VIEW_H - 4 - glyphHeight - (#lines - 1) * pitch
       for _, line in ipairs(lines) do
         drawText(line, 8, y)
-        y = y + 10
+        y = y + pitch
       end
     end
     G.pop()
@@ -140,7 +143,7 @@ function M.openProgress(game, textFn)
     local G = love.graphics
     G.push("all")
     G.setColor(0, 0, 0, 0.9)
-    G.rectangle("fill", 0, 0, G.getWidth(), G.getHeight())
+    G.rectangle("fill", 0, 0, VIEW_W, VIEW_H)
     G.setColor(1, 1, 1, 1)
     G.print(menu.title, 8, 8)
     local text = textFn and textFn(menu) or string.format("%d / %d",

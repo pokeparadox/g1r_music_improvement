@@ -58,12 +58,9 @@ return function(mod)
   if g3Mix and g3Mix.setSongIds and g3SongIds then
     g3Mix.setSongIds(g3SongIds)
   end
-  local mixEnabled
   local mixCandidatesFor
-  local mixSongList
-  local mixSongListCache
   local gen3Ui
-  local openMixSongs
+  local openGen3Sources
   local improve = function(src, settings) return improveModule.improve(src, settings) end
   local extraSpec = function(src, settings, id)
     local profile = id and profiles.forLabel(id) or nil
@@ -82,8 +79,16 @@ return function(mod)
     if v == "high" then return 0.5 end
     return 0.35
   end
+  -- Gen3 host games have no loader on game.mods, so setModOption cannot update
+  -- mod.options:get live.  Keep session overrides for every option write.
+  local optionOverrides = {}
+  local function optionValue(key)
+    local value = optionOverrides[key]
+    if value ~= nil then return value end
+    return mod.options:get(key)
+  end
   local function optionBool(key, default)
-    local value = mod.options:get(key)
+    local value = optionValue(key)
     if value == nil then return default end
     if value == false then return false end
     return tostring(value) ~= "0" and tostring(value) ~= "false"
@@ -98,7 +103,7 @@ return function(mod)
         g1_improved = optionBool("alt_g1_guided", true),
         g2 = optionBool("alt_g2_stock", true),
         g2_improved = optionBool("alt_g2_guided", true),
-        g3 = true,
+        g3 = optionBool("alt_g3_native", true),
         g3_mix = optionBool("alt_g3_mix", true),
       },
     }
@@ -645,6 +650,8 @@ return function(mod)
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g3_mix", type = "toggle", label = "G3 Mix", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
+    { key = "alt_g3_native", type = "toggle", label = "G3", default = true,
+      visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
       default = 7, min = 0, max = 7, step = 1 },
     { key = "extra_volume", type = "number", label = "EXTRA HARMONY MIX",
@@ -1185,15 +1192,7 @@ return function(mod)
     local s = currentSettings()
     local list = variantMap[nativeId]
     if not list or #list == 0 then return nil end
-    local enabledList = versions.filterEnabled(list, s.alt)
-    local eligible = {}
-    for _, record in ipairs(enabledList) do
-      -- Per-song G3 Mix toggles gate automatic playback only.  Mixes stay
-      -- queued and visible in the music test so enabling takes effect at once.
-      if not record.mix or mixEnabled(record.label) then
-        eligible[#eligible + 1] = record
-      end
-    end
+    local eligible = versions.filterEnabled(list, s.alt)
     if #eligible == 0 then return nil end
     local picked
     if s.shuffle then
@@ -1204,28 +1203,6 @@ return function(mod)
     if not picked then return nil end
     lastVariant[nativeId] = picked.key
     return picked.id
-  end
-
-  -- Persisted G3 Mix song toggles: stored as comma-separated disabled labels.
-  local mixDisabled = {}
-  local mixSelectionLoaded = false
-  local function loadMixSelection()
-    if mixSelectionLoaded then return end
-    mixSelectionLoaded = true
-    local raw = mod.options:get("mix_songs") or ""
-    for label in tostring(raw):gmatch("[^,]+") do mixDisabled[label] = true end
-  end
-  mixEnabled = function(label)
-    loadMixSelection()
-    return not mixDisabled[label]
-  end
-  local function saveMixSelection()
-    local disabled = {}
-    for label, off in pairs(mixDisabled) do
-      if off then disabled[#disabled + 1] = label end
-    end
-    table.sort(disabled)
-    setModOption(readyGame, "mix_songs", table.concat(disabled, ","))
   end
 
   mixCandidatesFor = function(label)
@@ -1245,7 +1222,8 @@ return function(mod)
     return out
   end
 
-  mixSongList = function()
+  local mixSongListCache
+  local function mixSongList()
     if mixSongListCache then return mixSongListCache end
     local seen, labels = {}, {}
     for _, entry in ipairs(versions.VERSIONS) do
@@ -1426,6 +1404,7 @@ return function(mod)
         pcall(game.state.persistOptions, game.state)
       end
     end
+    optionOverrides[key] = value
   end
 
   local function clearSongCache()
@@ -1754,34 +1733,53 @@ return function(mod)
     end,
   })
 
-  mod.content.screens:register("MusicImprovementMixSongs", {
+  local sourceKeys = {
+    { "shuffle", "SHUFFLE" },
+    { "alt_g1_stock", "G1" },
+    { "alt_g1_guided", "G1E" },
+    { "alt_g2_stock", "G2" },
+    { "alt_g2_guided", "G2E" },
+    { "alt_g3_mix", "G3 MIX" },
+    { "alt_g3_native", "G3" },
+  }
+  local function sourceRight(game, key)
+    if key == "alt_g3_native" and not hostIsGen3(game) then return "N/A" end
+    local value = optionValue(key)
+    local off = value == false or tostring(value) == "0"
+    -- FRLG font has no bracket glyphs; YES/NO render on every host.
+    return off and "NO" or "YES"
+  end
+  local function sourceItems(game)
+    local items = {}
+    for _, spec in ipairs(sourceKeys) do
+      items[#items + 1] = {
+        label = spec[2], right = sourceRight(game, spec[1]), entry = spec[1],
+      }
+    end
+    return items
+  end
+  local function toggleSource(game, key)
+    if key == "alt_g3_native" and not hostIsGen3(game) then return false end
+    local now = optionValue(key)
+    local off = now == false or tostring(now) == "0"
+    setModOption(game, key, off and "1" or "0")
+    return true
+  end
+  mod.content.screens:register("MusicImprovementSources", {
     new = function(game)
-      local function buildItems()
-        local items = {}
-        for _, label in ipairs(mixSongList()) do
-          items[#items + 1] = {
-            label = versions.nameFor(label),
-            right = mixEnabled(label) and "[X]" or "[ ]",
-            entry = label,
-          }
-        end
-        return items
-      end
-      local menu = mod.ui.ListMenu.new(game, "G3 MIX SONGS", buildItems(), {
+      local menu = mod.ui.ListMenu.new(game, "MUSIC SOURCES", sourceItems(game), {
         onChoose = function() end,
         onCancel = function() end,
         footer = "A TOGGLE\nB DONE",
-        rows = 6,
+        rows = 5,
       })
       local baseUpdate = menu.update
       menu.update = function(self, dt)
         local input = self.game and self.game.input
         if input and input:wasPressed("a") then
           local item = self.items[self.index]
-          if item and item.entry then
-            mixDisabled[item.entry] = not mixDisabled[item.entry]
-            saveMixSelection()
-            self.items = buildItems()
+          if item and item.entry and toggleSource(game, item.entry) then
+            self.items = sourceItems(game)
           end
           return
         end
@@ -1845,49 +1843,21 @@ return function(mod)
       },
 
       {
-        id = "musicMixSongs",
-        musicImprovementId = "music_improvement_mix_songs",
-        label = "G3 MIX SONGS",
-        value = function()
-          local count = 0
-          for _, label in ipairs(mixSongList()) do
-            if mixEnabled(label) then count = count + 1 end
-          end
-          return string.format("%d ON", count)
-        end,
+        id = "musicVol",
+        musicImprovementId = "music_improvement_sources",
+        label = "MUSIC SOURCES",
+        value = function() return "OPEN" end,
         activate = function(g)
           local game = (type(g) == "table" and g.game) or g or readyGame
-          openMixSongs(game)
+          if hostIsGen3(game) then
+            openGen3Sources(game)
+          else
+            mod.ui.push(game, "MusicImprovementSources")
+          end
         end,
       },
 
     }
-    local toggles = {
-      { "alt_g1_stock", "G1" },
-      { "alt_g1_guided", "G1E" },
-      { "alt_g2_stock", "G2" },
-      { "alt_g2_guided", "G2E" },
-      { "alt_g3_mix", "G3 Mix" },
-      { "shuffle", "SHUFFLE" },
-    }
-    for _, spec in ipairs(toggles) do
-      local key, label = spec[1], spec[2]
-      musicRows[#musicRows + 1] = {
-        id = key,
-        musicImprovementId = "music_improvement_" .. key,
-        label = label,
-        value = function()
-          return mod.options:get(key) == false
-            or tostring(mod.options:get(key)) == "0" and "OFF" or "ON"
-        end,
-        activate = function(g)
-          local game = (type(g) == "table" and g.game) or g or readyGame
-          local now = mod.options:get(key)
-          local off = now == false or tostring(now) == "0"
-          setModOption(game, key, off and "1" or "0")
-        end,
-      }
-    end
     if type(mod.ui.insertAfter) == "function" then
       local anchor = "SOUND"
       for _, row in ipairs(musicRows) do
@@ -2235,6 +2205,24 @@ return function(mod)
     pcall(target.play, game.data, id, true, { reason = "jukebox" })
   end
 
+  openGen3Sources = function(game)
+    local ui = gen3Ui()
+    if not ui then return false end
+    local items = sourceItems(game)
+    return ui.openList(game, {
+      title = "MUSIC SOURCES",
+      items = items,
+      stayOpen = true,
+      hint = { "A TOGGLE  B BACK" },
+      onChoose = function(item)
+        if item and item.entry and toggleSource(game, item.entry) then
+          item.right = sourceRight(game, item.entry)
+        end
+      end,
+      onCancel = function() end,
+    })
+  end
+
   openGen3Jukebox = function(game)
     local ui = gen3Ui()
     if not ui then return false end
@@ -2267,34 +2255,6 @@ return function(mod)
       musicTestPlay(game, items[1])
     end
     return menu
-  end
-
-  openMixSongs = function(game)
-    if hostIsGen3(game) then
-      local ui = gen3Ui()
-      if not ui then return false end
-      local items = {}
-      for _, label in ipairs(mixSongList()) do
-        items[#items + 1] = {
-          label = versions.nameFor(label),
-          right = mixEnabled(label) and "[X]" or "[ ]",
-          entry = label,
-        }
-      end
-      return ui.openList(game, {
-        title = "G3 MIX SONGS",
-        items = items,
-        stayOpen = true,
-        hint = { "A TOGGLE  B DONE", "DISABLED SONGS STAY NATIVE" },
-        onSelect = function(item)
-          if not item or not item.entry then return end
-          mixDisabled[item.entry] = not mixDisabled[item.entry]
-          saveMixSelection()
-          item.right = mixEnabled(item.entry) and "[X]" or "[ ]"
-        end,
-      })
-    end
-    return mod.ui.push(game, "MusicImprovementMixSongs")
   end
 
   local function openGen3Confirm(game)

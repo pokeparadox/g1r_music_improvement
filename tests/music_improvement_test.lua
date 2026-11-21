@@ -756,6 +756,49 @@ T.eq(optionRows[3] and optionRows[3].musicImprovementId, "music_improvement_juke
   "Music Test is reachable from the visible options group")
 T.eq(optionRows[4] and optionRows[4].musicImprovementId, "music_improvement_regenerate",
   "cache regeneration is reachable from the visible options group")
+T.eq(optionRows[5] and optionRows[5].musicImprovementId, "music_improvement_sources",
+  "source toggles are grouped in the visible options group")
+T.eq(optionRows[5] and optionRows[5].id, "musicVol",
+  "source row belongs to the AUDIO options group")
+local mixSongsRow
+for _, row in ipairs(optionRows) do
+  if row.musicImprovementId == "music_improvement_mix_songs" then
+    mixSongsRow = row
+    break
+  end
+end
+T.eq(mixSongsRow, nil, "per-song G3 Mix configuration row is gone")
+T.eq(run.loader.content.screens:get("MusicImprovementMixSongs"), nil,
+  "per-song G3 Mix configuration screen is gone")
+local okGen3Sources = pcall(function()
+  optionRows[5].activate({ save = { version = "firered" } })
+  pcall(require("src.ui.game3.stack").pop, "music_improvement_menu")
+end)
+T.eq(okGen3Sources, true, "source row opens through the GBA modal stack")
+local stockToggleRow
+for _, row in ipairs(optionRows) do
+  if row.musicImprovementId == "music_improvement_alt_g1_stock" then
+    stockToggleRow = row
+    break
+  end
+end
+T.eq(stockToggleRow, nil,
+  "individual source toggles live in the source screen, not the options list")
+local sourceScreen = run.loader.content.screens:get("MusicImprovementSources")
+T.eq(type(sourceScreen and sourceScreen.new), "function",
+  "source screen is registered")
+local sourceMenu = sourceScreen.new(run.data)
+T.eq(sourceMenu.rows, 5, "source menu leaves room for the footer")
+local sourceLabels = { "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G3" }
+for index, label in ipairs(sourceLabels) do
+  T.eq(sourceMenu.items[index] and sourceMenu.items[index].label, label,
+    "source toggle " .. index .. " is " .. label)
+end
+T.eq(sourceMenu.items[7].right, "N/A",
+  "native G3 is unavailable outside GBA hosts")
+local gbaSourceMenu = sourceScreen.new({ save = { version = "firered" } })
+T.eq(gbaSourceMenu.items[7].right, "YES",
+  "native G3 is enabled on GBA hosts")
 
 if cache and exports and type(cache.delete) == "function" then
   local failurePath = "songs/gold_test_delete_failure.lua"
@@ -829,4 +872,70 @@ CoreData.audio = previousAudio
 Version.modApi = previousModApi
 GameVersion.set(previousVersion)
 cueRun.release()
+
+-- Fresh Gen3-loaded instance: the sandbox denies game3 stack modules on Gen2
+-- hosts, so modal toggle state must be checked with generation = 3.
+local gbaRun = T.sdk.loadMod("mods/g1r_music_improvement", {
+  data = T.sdk.gen3Data(), generation = 3,
+})
+local gbaRows = Runtime.call("ui.options.rows",
+  function(_, rows) return rows end, { data = gbaRun.data },
+  { { id = "sound", label = "SOUND" } })
+local gbaSourceRow
+for _, row in ipairs(gbaRows) do
+  if row.musicImprovementId == "music_improvement_sources" then
+    gbaSourceRow = row
+  end
+end
+T.eq(gbaSourceRow ~= nil, true, "GBA options exposes MUSIC SOURCES")
+local GbaStack = require("src.ui.game3.stack")
+GbaStack.clear()
+gbaSourceRow.activate({ save = { version = "firered" } })
+local gbaMenu = GbaStack.top() and GbaStack.top().mod
+T.eq(type(gbaMenu and gbaMenu.onChoose), "function", "GBA sources modal opens")
+if gbaMenu and gbaMenu.items[1] then
+  local shuffleItem = gbaMenu.items[1]
+  gbaMenu.onChoose(shuffleItem)
+  T.eq(shuffleItem.right, "NO", "GBA source toggle status updates live")
+  gbaMenu.onChoose(shuffleItem)
+  T.eq(shuffleItem.right, "YES", "GBA source toggle can be restored")
+end
+pcall(GbaStack.pop, "music_improvement_menu")
+gbaRun.release()
+
+-- Gen3 right labels must use the GBA viewport, not the desktop window width.
+local fontKey = "src.ui.game3.frlg_font"
+local previousFont = package.loaded[fontKey]
+local drawCalls = {}
+package.loaded[fontKey] = {
+  COLOR = { WHITE = {} },
+  draw = function(text, x, y)
+    drawCalls[#drawCalls + 1] = { text = tostring(text), x = x, y = y }
+  end,
+  measure = function(text) return #tostring(text) * 6 end,
+  linePitch = function() return 15 end,
+  GLYPH_HEIGHT = 14,
+}
+package.loaded["mods.g1r_music_improvement.gen3_ui"] = nil
+local Gen3Ui = require("mods.g1r_music_improvement.gen3_ui")
+GbaStack.clear()
+local drawMenu = Gen3Ui.openList({}, {
+  title = "MUSIC SOURCES",
+  items = { { label = "SHUFFLE", right = "YES" } },
+  hint = { "A TOGGLE  B BACK" },
+})
+package.loaded[fontKey] = previousFont
+T.eq(drawMenu ~= nil, true, "stubbed Gen3 list opens")
+if drawMenu then
+  drawMenu.draw()
+  local rightX, hintY
+  for _, call in ipairs(drawCalls) do
+    if call.text == "YES" then rightX = call.x end
+    if call.text == "A TOGGLE  B BACK" then hintY = call.y end
+  end
+  T.eq(rightX, 214, "Gen3 right labels align inside the GBA viewport")
+  T.eq(hintY, 142, "Gen3 hints stay above the GBA bottom edge")
+end
+pcall(GbaStack.pop, "music_improvement_menu")
+
 T.finish("g1r_music_improvement")
