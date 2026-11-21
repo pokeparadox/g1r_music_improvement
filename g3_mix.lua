@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 4
+local CONVERTER_VERSION = 5
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -497,7 +497,7 @@ local function toneInfo(voicegroups, vgId, note, specWaves)
   if kind == 3 then
     local wave = tone and tone.wave
     if specWaves and type(wave) == "table" and #wave >= 32 then
-      local signature, min, max = {}, 0, 0
+      local signature, min, max = {}, math.huge, -math.huge
       for i = 1, 32 do
         local n = tonumber(wave[i]) or 0
         signature[i] = tostring(n)
@@ -513,11 +513,13 @@ local function toneInfo(voicegroups, vgId, note, specWaves)
       if #specWaves < 12 then
         local normalized = {}
         -- Cached GBA wave RAM is 0..15, but ChipSynth expects -1..1 samples.
-        -- Fixtures already using signed samples stay as-is.
-        local scale = min >= 0 and max > 1
+        -- Scale by the samples actually present: many melodies occupy only a
+        -- narrow nibble band, and a fixed 0..15 map left them near silence.
+        local center, half = (min + max) / 2, (max - min) / 2
         for i = 1, #wave do
           local n = tonumber(wave[i]) or 0
-          normalized[i] = scale and math.max(-1, math.min(1, n / 7.5 - 1)) or n
+          normalized[i] = half > 0
+            and math.max(-1, math.min(1, (n - center) / half)) or 0
         end
         specWaves[#specWaves + 1] = { signature = signature, wave = normalized }
         return kind, 0, #WAVES + #specWaves - 1, tone
@@ -676,6 +678,7 @@ local function emitNote(program, note, hw, kind, duty, waveIndex, withNotetype)
       -- Wave level 2 is half amplitude; start full one step earlier so low
       -- M4A melody volumes stay audible beside full-level pulse backing.
       local waveLevel = volume >= 7 and 1 or (volume >= 4 and 2 or 3)
+      if note.isLead then waveLevel = 1 end
       program[#program + 1] = {
         notetype = { speed = speed, waveLevel = waveLevel, waveInstrument = waveIndex or 0 },
       }
@@ -856,13 +859,14 @@ function M.buildSpecs(song, voicegroups, info)
     for i = start, math.min(start + 3, #decoded) do
       analyses[#analyses + 1] = analyzeTrack(decoded[i], specWaves)
     end
-    -- Sparse high wave tracks are melodies.  Boost them inside the shared
-    -- program; full-scale pulse backing needs no extra gain.
+    -- Sparse high tracks are melodies.  Wave instruments win the tiebreak,
+    -- but a pulse lead must still get the boost when no wave track qualifies.
     local leadIndex, leadScore
     for index, analysis in ipairs(analyses) do
-      if analysis.dominant == 3 and analysis.avgKey >= 55
+      if analysis.avgKey >= 55 and #analysis.notes > 0
           and #analysis.notes <= 160 then
         local score = analysis.avgKey - #analysis.notes * 0.02
+          + (analysis.dominant == 3 and 12 or 0)
         if not leadScore or score > leadScore then
           leadIndex, leadScore = index, score
         end
@@ -871,8 +875,10 @@ function M.buildSpecs(song, voicegroups, info)
     if leadIndex then
       for _, note in ipairs(analyses[leadIndex].notes) do
         note.gainScale = 1.4
+        note.isLead = true
         for _, segment in ipairs(note.segments) do
           segment.gainScale = 1.4
+          segment.isLead = true
         end
       end
     end

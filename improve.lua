@@ -265,24 +265,27 @@ local function improve(source, settings)
   settings = settingsOf(settings)
   local improved = cloneSpec(source)
   if not settings.enabled then return improved end
+  -- G3 Mix already balances its tracks from the M4A volume bytes; lifting hw1
+  -- to a floor of 12 buries the converted melody.
+  local liftHw1 = source.g3Mix ~= true
 
   for _, channel in ipairs(improved.channels or {}) do
     if channel.program then
       for _, event in ipairs(channel.program) do
-        if channel.hw == 1 and event.duty ~= nil then
+        if liftHw1 and channel.hw == 1 and event.duty ~= nil then
           event.duty = math.max(event.duty, 2)
         end
         -- decoded engine events carry volume/fade at the top level (the
         -- interpreter folds the notetype opcode into the tone event); the
         -- authored DSL carries them under notetype -- accept both shapes.
-        if channel.hw == 1 and event.notetype == nil and (event.volume or event.fade) then
+        if liftHw1 and channel.hw == 1 and event.notetype == nil and (event.volume or event.fade) then
           event.notetype = {
             speed = (event.notetype and event.notetype.speed) or 12,
             volume = event.volume or 12,
             fade = event.fade or 0,
           }
         end
-        if channel.hw == 1 and event.notetype and event.notetype.volume then
+        if liftHw1 and channel.hw == 1 and event.notetype and event.notetype.volume then
           event.notetype.volume = math.max(event.notetype.volume, 12)
         end
       end

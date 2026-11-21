@@ -432,7 +432,7 @@ local leadVoicegroups = {
 local leadSpec = mix.buildSpecs({
   tracks = 2,
   trackData = {
-    string.char(0xBD, 1, 0xBE, 45, 0xD3, 79, 127, 0xB1),
+    string.char(0xBD, 1, 0xBE, 20, 0xD3, 79, 30, 0xB1),
     string.char(0xBD, 2, 0xBE, 90, 0xD3, 45, 127, 0xB1),
   },
   voicegroup = 1,
@@ -447,6 +447,20 @@ for _, channel in ipairs(leadSpec.channels) do
   end
 end
 eq(leadWaveLevel, 1, "sparse wave lead reaches full wave level")
+
+-- GBA melodies often use only a narrow nibble band.  Scale by samples present
+-- so they reach full amplitude instead of staying a faint twinkle.
+local narrowWave = {}
+for i = 1, 32 do narrowWave[i] = 4 + ((i - 1) % 8) end
+local narrowSpec = mix.buildSpecs({
+  tracks = 1,
+  trackData = { string.char(0xBD, 1, 0xBE, 45, 0xD3, 79, 127, 0xB1) },
+  voicegroup = 1,
+}, { [1] = { [1] = { type = 3, wave = narrowWave } } },
+  { voicegroupId = 1 })[1]
+local custom = narrowSpec and narrowSpec.waves and narrowSpec.waves[5]
+eq(custom and custom[1], -1, "narrow GBA wave reaches -1")
+eq(custom and custom[8], 1, "narrow GBA wave reaches +1")
 
 -- Cache index voicegroupId wins over the ROM pointer in song.voicegroup.
 -- Otherwise every tone lookup misses and all instruments share one envelope.
