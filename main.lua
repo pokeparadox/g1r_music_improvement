@@ -1902,6 +1902,13 @@ return function(mod)
     end
   end
 
+  -- Gen1/Gen2 cue the same native battle id twice (pre-wipe and battle enter).
+  -- Shuffle would otherwise pick a different variant on the second cue, so core
+  -- sees a new label and restarts playback. Reuse the choice while it is still
+  -- the current song; any real stop/change clears it.
+  local lastCueNative
+  local lastCueVariant
+
   mod.hooks:wrap("music.select", function(next, chosen, ctx)
     if mod.options:get("enabled") == false
         and (mod.options:get("source") or "native") == "native" then
@@ -1918,10 +1925,15 @@ return function(mod)
     if not ctx or ctx.reason == "jukebox" then
       return next(chosen, ctx)
     end
+    if lastCueVariant and chosen == lastCueNative and currentSong == lastCueVariant then
+      return next(lastCueVariant, ctx)
+    end
     local improved = selectVariantFor(chosen)
     if improved then
+      lastCueNative, lastCueVariant = chosen, improved
       return next(improved, ctx)
     end
+    lastCueNative, lastCueVariant = nil, nil
     return next(chosen, ctx)
   end)
 
@@ -2358,6 +2370,9 @@ return function(mod)
   mod.events:on("music.started", function(payload)
     local song = payload and payload.song
     currentSong = song
+    if song ~= lastCueVariant then
+      lastCueNative, lastCueVariant = nil, nil
+    end
     currentReason = payload and payload.reason
     currentImproved = (type(song) == "string" and song:match("^Music_Improved") ~= nil)
     suppressExtra = false
@@ -2398,6 +2413,7 @@ return function(mod)
   end)
   mod.events:on("music.stopped", function()
     currentImproved = false
+    lastCueNative, lastCueVariant = nil, nil
     currentSong = nil
     currentReason = nil
     pendingExtra = nil

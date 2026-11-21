@@ -762,9 +762,62 @@ if cache and exports and type(cache.delete) == "function" then
     "regeneration stops before changing settings when cache deletion fails")
 end
 
+-- ------- duplicate battle cues keep the variant that is already playing
+
+-- Stand in for Shuffle re-rolling: make chooseVariant alternate ids for one
+-- native song.  The select hook under test is the production implementation.
+local function replaceOnce(source, old, new)
+  local at = source:find(old, 1, true)
+  if not at then error("test patch target missing: " .. old) end
+  return source:sub(1, at - 1) .. new .. source:sub(at + #old)
+end
+
+local mainPath = "mods/g1r_music_improvement/main.lua"
+local patchedMain = replaceOnce(assert(runFs.read(mainPath)),
+  "  local variantMap = {}",
+  "  local variantMap = {}\n  local cuePickCount = 0")
+patchedMain = replaceOnce(patchedMain,
+  "    local improved = chooseVariant(song)",
+  [[    local improved
+    if song == "Music_Gen2CacheTest" then
+      cuePickCount = cuePickCount + 1
+      improved = cuePickCount % 2 == 1
+        and "Music_ImprovedGen2CacheTest" or "Music_StockGen2CacheTest"
+    else
+      improved = chooseVariant(song)
+    end]])
+runFs.write(mainPath, patchedMain)
+run.release()
+
+local cueData = T.fixtures.fresh()
+cueData.audio = { songs = {}, gen2 = true }
+for id, def in pairs(Data.audio.songs) do
+  if not tostring(id):match("^Music_Improved")
+      and not tostring(id):match("^Music_Stock") then
+    cueData.audio.songs[id] = def
+  end
+end
+CoreData.audio = cueData.audio
+local cueRun = T.sdk.loadMod("mods/g1r_music_improvement", {
+  data = cueData, generation = 2, fs = runFs,
+})
+T.check(#cueRun.errors == 0, "duplicate-cue fixture loads clean")
+
+local cueA = select(gen2SongId, { reason = "battle" })
+T.eq(cueA, "Music_ImprovedGen2CacheTest", "shuffle stand-in picks the first variant")
+Runtime.emit("music.started", { song = cueA, reason = "battle" })
+T.eq(select(gen2SongId, { reason = "battle" }), cueA,
+  "second battle cue reuses the variant already playing")
+Runtime.emit("music.stopped")
+T.eq(select(gen2SongId, { reason = "battle" }), "Music_StockGen2CacheTest",
+  "stopping clears the cached variant so shuffle can pick again")
+Runtime.emit("music.started", { song = "Music_Other", reason = "battle" })
+T.eq(select(gen2SongId, { reason = "battle" }), "Music_ImprovedGen2CacheTest",
+  "a different started song clears the cached variant")
+
 ChipSynth.newEngine = originalNewEngine
 CoreData.audio = previousAudio
 Version.modApi = previousModApi
 GameVersion.set(previousVersion)
-run.release()
+cueRun.release()
 T.finish("g1r_music_improvement")
