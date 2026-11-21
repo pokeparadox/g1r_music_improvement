@@ -694,15 +694,16 @@ return function(mod)
   local hostGeneration
   -- Toast format: <Canonical Name> — <G1 STOCK|G1 GUIDED|...|NATIVE>
   local function showToast(value)
+    local generation = hostGeneration()
     local record = type(value) == "table" and value or recordById[value]
     local info
     if record then
       info = {
         name = record.name or versions.nameFor(record.label or ""),
-        variant = versions.variantKind(record),
+        variant = versions.variantKind(record, generation),
       }
     else
-      info = versions.describe(value, hostGeneration())
+      info = versions.describe(value, generation)
     end
     local label = info.label or versions.variantLabel(info.variant or "native")
     toast.text = string.format("%s — %s", tostring(info.name or "Music"), label)

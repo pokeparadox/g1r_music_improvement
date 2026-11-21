@@ -31,6 +31,12 @@ assert(V.variantLabel("g2_improved") == "G2E")
 assert(V.variantLabel({ id = "Music_MixCities1_firered" }) == "G3 Mix")
 assert(V.variantLabel({ native = true, generation = 3 }) == "G3")
 
+-- Host-native improved IDs have no source suffix; label from loaded game.
+assert(V.variantKind("Music_ImprovedTitleScreen", 2) == "g2_improved")
+assert(V.describe("Music_ImprovedTitleScreen", 2).label == "G2E")
+assert(V.describe("Music_ImprovedTitleScreen", 1).label == "G1E")
+assert(V.describe("Music_TitleScreen", 2).label == "G2")
+
 -- RSE aliases normalise to the canonical FRLG label before mix lookup.
 assert(V.canonicalGen3Label("MUS_RG_PALLET") == "MUS_PALLET")
 assert(V.canonicalGen3Label("MUS_GSC_PEWTER") == "MUS_PEWTER")

@@ -223,6 +223,14 @@ function M.describe(id, hostGeneration)
   if not kind then
     kind, base, version = raw:match("^Music_(Mix)(.-)_([%w]+)$")
   end
+  -- Host-native improved songs have no source-version suffix; their
+  -- generation comes from the loaded game, not the legacy "native" label.
+  if not kind then
+    kind, base = raw:match("^Music_(Improved)(.-)$")
+  end
+  if not kind then
+    kind, base = raw:match("^Music_(Stock)(.-)$")
+  end
   if kind then
     local source = M.BY_ID[version]
     if source then generation = source.generation end
@@ -348,7 +356,7 @@ for key, label in pairs({
   g2_stock = "G2", g2_guided = "G2E",
 }) do VARIANT_LABELS[key] = label end
 
-function M.variantKind(value)
+function M.variantKind(value, hostGeneration)
   if type(value) == "string" then
     if VARIANT_LABELS[value] and not tostring(value):match("^Music_") then
       return value
@@ -366,7 +374,16 @@ function M.variantKind(value)
   local generation
   local version = id:match("_([%w]+)$")
   local source = version and M.BY_ID[version]
-  if source then generation = source.generation end
+  if source then
+    generation = source.generation
+  elseif (id:match("^Music_Improved") or id:match("^Music_Stock"))
+      and not (value.version or (value.candidate and value.candidate.version)) then
+    -- Host-native songs have no source suffix.  Use the record's generation
+    -- when present, otherwise the loaded game's generation passed by the UI.
+    generation = value.generation
+      or (value.candidate and value.candidate.generation)
+      or tonumber(hostGeneration)
+  end
   if not generation then
     version = value.version or (value.candidate and value.candidate.version)
     source = version and M.BY_ID[version]
