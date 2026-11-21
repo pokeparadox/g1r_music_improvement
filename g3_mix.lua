@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 3
+local CONVERTER_VERSION = 4
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -636,22 +636,22 @@ function M.noteTiming(gate)
   local ticks = math.max(1, math.floor(gate + 0.5))
   local bestSpeed, bestLength, bestError = 1, 1, math.huge
   for speed = 1, 15 do
-    local length = ticks / speed
-    local rounded = math.max(1, math.floor(length + 0.5))
-    if rounded <= 16 then
-      local error = math.abs(rounded * speed - ticks)
-      if error < bestError then
-        bestSpeed, bestLength, bestError = speed, rounded, error
-      end
-      if error == 0 then break end
+    -- Never round up: a note longer than its gate cannot be shortened by the
+    -- following rest, so the error would accumulate across channels.
+    local rounded = math.max(1, math.min(16, math.floor(ticks / speed)))
+    local error = ticks - rounded * speed
+    if error < bestError then
+      bestSpeed, bestLength, bestError = speed, rounded, error
     end
+    if error == 0 then break end
   end
   return bestSpeed, bestLength
 end
 
 local function emitNote(program, note, hw, kind, duty, waveIndex, withNotetype)
   local tempo = math.max(1, note.tempo or 150)
-  local speed, length = M.noteTiming(note.gate)
+  local speed, length = note.timingSpeed, note.timingLength
+  if not speed then speed, length = M.noteTiming(note.gate) end
   local volume, fade, duty = M.envelopeFor(note, duty)
   local key = math.max(12, math.min(119, math.floor(note.key or 60)))
   local pitch, octave = key % 12, math.floor(key / 12) - 1
@@ -829,6 +829,7 @@ function M.buildSpecs(song, voicegroups, info)
           copy.gate = boundaries[part + 1].tick - boundaries[part].tick
           copy.key = boundaries[part].key
           copy.tick = boundaries[part].tick
+          copy.timingSpeed, copy.timingLength = M.noteTiming(copy.gate)
           segments[part] = copy
         end
         notes[#notes + 1] = {
@@ -900,27 +901,26 @@ function M.buildSpecs(song, voicegroups, info)
       return (a.order or 0) < (b.order or 0)
     end)
 
-    local programs, cursors = {}, {}
-    for hw = 1, 4 do programs[hw], cursors[hw] = {}, 0 end
+    local programs, cursors, emitCursors = {}, {}, {}
+    for hw = 1, 4 do programs[hw], cursors[hw], emitCursors[hw] = {}, 0, 0 end
+    local function padTo(hw, tick)
+      if emitCursors[hw] < tick then
+        emitRest(programs[hw], tick - emitCursors[hw])
+        emitCursors[hw] = tick
+      end
+      if cursors[hw] < tick then cursors[hw] = tick end
+    end
     local busyUntil = { [1] = 0, [2] = 0, [3] = 0, [4] = 0 }
     local loopTargets
     for _, action in ipairs(actions) do
       if not loopTargets and action.tick >= globalLoopTick then
         loopTargets = {}
         for hw = 1, 4 do
-          if cursors[hw] < globalLoopTick then
-            emitRest(programs[hw], globalLoopTick - cursors[hw])
-            cursors[hw] = globalLoopTick
-          end
+          padTo(hw, globalLoopTick)
           loopTargets[hw] = #programs[hw] + 1
         end
       end
-      for hw = 1, 4 do
-        if cursors[hw] < action.tick then
-          emitRest(programs[hw], action.tick - cursors[hw])
-          cursors[hw] = action.tick
-        end
-      end
+      for hw = 1, 4 do padTo(hw, action.tick) end
       if action.all then
         for hw = 1, 4 do
           programs[hw][#programs[hw] + 1] = { tempo = gbTempo(action.tempo) }
@@ -934,29 +934,30 @@ function M.buildSpecs(song, voicegroups, info)
           note.start = assigned
           for _, segment in ipairs(note.segments) do segment.tick = segment.tick + delay end
         end
-        if cursors[hw] < assigned then
-          emitRest(programs[hw], assigned - cursors[hw])
-          cursors[hw] = assigned
-        end
+        padTo(hw, assigned)
+        local previousSpeed, emittedTicks
         for part, segment in ipairs(note.segments) do
+          -- Later pitch segments keep the first speed unless their gate needs
+          -- a different note length; re-emit notetype so elapsed time is exact.
           emitNote(programs[hw], segment, hw, note.kind, note.duty,
-            note.waveIndex, part == 1)
+            note.waveIndex, part == 1 or segment.timingSpeed ~= previousSpeed)
+          previousSpeed = segment.timingSpeed
+          emittedTicks = (emittedTicks or 0)
+            + segment.timingSpeed * segment.timingLength
         end
+        emitCursors[hw] = assigned + (emittedTicks or 0)
         cursors[hw] = assigned + note.gate
       end
     end
     if not loopTargets then
       loopTargets = {}
       for hw = 1, 4 do
-        if cursors[hw] < globalLoopTick then
-          emitRest(programs[hw], globalLoopTick - cursors[hw])
-          cursors[hw] = globalLoopTick
-        end
+        padTo(hw, globalLoopTick)
         loopTargets[hw] = #programs[hw] + 1
       end
     end
     for hw = 1, 4 do
-      if cursors[hw] < lastTick then emitRest(programs[hw], lastTick - cursors[hw]) end
+      padTo(hw, lastTick)
       programs[hw][#programs[hw] + 1] = {
         loop = { count = 0, to = loopTargets[hw] },
       }

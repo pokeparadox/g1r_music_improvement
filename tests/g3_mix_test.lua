@@ -299,6 +299,34 @@ assert(#bendPitches >= 2, "bend emits multiple pitch segments")
 assert(bendPitches[1] ~= bendPitches[2], "bend changes segment pitch")
 eq(bendNotetypes, 1, "pitch split does not retrigger notetype")
 
+-- A pitch split whose segments need different note speeds must re-emit
+-- notetype; otherwise the first speed stretches the whole note and desyncs
+-- later channels (Gym Leader Battle, track 2).
+local splitTrack = string.char(
+  0xBD, 0x01,
+  0xCF, 60, 100, 60,
+  0xA0,
+  0xC0, 0x42,
+  0xB1
+)
+local splitSpec = mix.buildSpecs({
+  tracks = 1, trackData = { splitTrack }, voicegroup = 1,
+}, voicegroups, { voicegroupId = 1 })[1]
+local splitProgram = splitSpec.channels[1].program
+local splitSpeeds, splitTicks = {}, 0
+for _, event in ipairs(splitProgram) do
+  if event.notetype and event.notetype.speed then
+    splitSpeeds[#splitSpeeds + 1] = event.notetype.speed
+  end
+  if event.len then
+    splitTicks = splitTicks + event.len * (splitSpeeds[#splitSpeeds] or 1)
+  end
+end
+eq(#splitSpeeds, 2, "different segment speeds re-emit notetype")
+eq(splitSpeeds[1], 3, "first segment uses speed 3")
+eq(splitSpeeds[2], 1, "second segment uses speed 1")
+eq(splitTicks, 60, "segmented note keeps original gate duration")
+
 -- Zero-volume dummy triggers are dropped; same-tick duplicates coalesce.
 local function noteCount(bytes)
   local count = 0
@@ -318,6 +346,20 @@ assert(duplicate.events[1].volume < 100, "duplicate volume lowered")
 local noteSpeed, noteLength = mix.noteTiming(100)
 eq(noteSpeed, 10, "gate 100 uses speed 10")
 eq(noteLength, 10, "gate 100 uses length 10")
+local oddSpeed, oddLength = mix.noteTiming(223)
+assert(oddSpeed * oddLength <= 223, "unrepresentable gate never rounds up")
+
+local oddTrack = string.char(0xBD, 1, 0xFF, 60, 100, 127, 0xB1)
+local oddSpec = mix.buildSpecs({
+  tracks = 1, trackData = { oddTrack }, voicegroup = 1,
+}, voicegroups, { voicegroupId = 1 })[1]
+local oddTotal, oddState = 0, 1
+for _, event in ipairs(oddSpec.channels[1].program) do
+  if event.notetype and event.notetype.speed then oddState = event.notetype.speed end
+  if event.len then oddTotal = oddTotal + event.len * oddState
+  elseif event.rest then oddTotal = oddTotal + event.rest * oddState end
+end
+eq(oddTotal, 223, "unrepresentable gate padded to exact duration")
 
 -- Tempo changes from any track are replayed on every chip channel.
 local sharedTempoSong = {

@@ -687,6 +687,15 @@ for _, id in ipairs(exports.musicIds({ data = Data })) do
 end
 T.check(listed, "generated song is visible to the music test list")
 
+-- Mix variants belong in LEFT/RIGHT selection, not as separate rows.
+Data.audio.songs.Music_MixGen1CacheTest_firered = {}
+local mixListed = false
+for _, id in ipairs(exports.musicIds({ data = Data })) do
+  if id == "Music_MixGen1CacheTest_firered" then mixListed = true end
+end
+T.check(not mixListed, "mix variants are not separate music test rows")
+Data.audio.songs.Music_MixGen1CacheTest_firered = nil
+
 -- ------- the hook defers songs without an improved mapping
 
 local function select(song_, ctx)

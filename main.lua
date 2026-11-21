@@ -691,13 +691,7 @@ return function(mod)
   local applyAll = true
 
   local toast = { text = nil, until_ = 0 }
-  local function hostGeneration()
-    if okGameVersion and GameVersion and GameVersion.generation then
-      local version = GameVersion.get and GameVersion.get() or "red"
-      return GameVersion.generation(version) or 1
-    end
-    return 1
-  end
+  local hostGeneration
   -- Toast format: <Canonical Name> — <G1 STOCK|G1 GUIDED|...|NATIVE>
   local function showToast(value)
     local record = type(value) == "table" and value or recordById[value]
@@ -764,6 +758,25 @@ return function(mod)
   end
 
   local activeCacheGame = cacheGameId(nil)
+
+  -- Toast labels follow the loaded game, not GameVersion.get(), which can be
+  -- stale on hosts that swap save files without reselecting the global game.
+  hostGeneration = function()
+    local ids = {
+      readyGame and cacheGameId(readyGame),
+      activeCacheGame,
+      okGameVersion and GameVersion and GameVersion.get and GameVersion.get(),
+    }
+    if okGameVersion and GameVersion and GameVersion.generation then
+      for _, id in ipairs(ids) do
+        if id and id ~= "" and id ~= "unknown" then
+          local ok, generation = pcall(GameVersion.generation, id)
+          if ok and generation then return generation end
+        end
+      end
+    end
+    return 1
+  end
 
   local cacheAliases = {}
 
@@ -1681,13 +1694,17 @@ return function(mod)
   local function musicIds(game)
     local ids, seen = {}, {}
     for id in mod.content.music:each() do
-      if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+      if not seen[id] and not tostring(id):match("^Music_Mix") then
+        seen[id] = true; ids[#ids + 1] = id
+      end
     end
     local songs = game and game.data and game.data.audio
       and game.data.audio.songs
     if type(songs) == "table" then
       for id in pairs(songs) do
-        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+        if not seen[id] and not tostring(id):match("^Music_Mix") then
+          seen[id] = true; ids[#ids + 1] = id
+        end
       end
     end
     table.sort(ids)
