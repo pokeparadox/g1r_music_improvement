@@ -45,7 +45,7 @@ local specs = mix.buildSpecs(song, voicegroups, { voicegroupId = 1 })
 assert(specs, "buildSpecs returned nil")
 eq(#specs, 2, "engine count")
 eq(#specs[1].channels, 4, "first engine channels")
-eq(#specs[2].channels, 1, "second engine channels")
+eq(#specs[2].channels, 4, "second engine channels")
 eq(specs[1].tempo, 256, "base tempo")
 local used = {}
 for _, channel in ipairs(specs[1].channels) do
@@ -274,6 +274,8 @@ local loudVolume = mix.envelopeFor({ vel = 127, volume = 255 })
 assert(quietVolume >= 5 and quietVolume <= 7, "quiet track stays audible")
 assert(loudVolume == 15, "loud track reaches full scale")
 assert(loudVolume > quietVolume, "volume stays ordered")
+eq(mix.envelopeFor({ vel = 127, volume = 45, gainScale = 1.4 }), 7,
+  "lead gain scale raises quiet wave note")
 
 -- BEND inside a long note splits pitch without retriggering the envelope.
 local bendTrack = string.char(
@@ -366,13 +368,43 @@ local waveSpec = mix.buildSpecs({
   tracks = 1, trackData = { waveTrack }, voicegroup = 1,
 }, voicegroups, { voicegroupId = 1 })[1]
 local waveLevel
-for _, event in ipairs(waveSpec.channels[1].program) do
-  if event.notetype and event.notetype.waveLevel then
-    waveLevel = event.notetype.waveLevel
-    break
+for _, channel in ipairs(waveSpec.channels) do
+  for _, event in ipairs(channel.program) do
+    if event.notetype and event.notetype.waveLevel then
+      waveLevel = event.notetype.waveLevel
+      break
+    end
   end
 end
-assert(waveLevel and waveLevel >= 2, "wave note uses audible wave level")
+eq(waveLevel, 1, "audible wave uses full wave level")
+
+-- Sparse wave lead with a low M4A volume must not collapse to half amplitude.
+local leadWave = {}
+for i = 1, 32 do leadWave[i] = (i - 1) % 16 end
+local leadVoicegroups = {
+  [1] = {
+    [1] = { type = 3, wave = leadWave, attack = 0, decay = 2, sustain = 4 },
+    [2] = { type = 1, attack = 0, decay = 0, sustain = 15 },
+  },
+}
+local leadSpec = mix.buildSpecs({
+  tracks = 2,
+  trackData = {
+    string.char(0xBD, 1, 0xBE, 45, 0xD3, 79, 127, 0xB1),
+    string.char(0xBD, 2, 0xBE, 90, 0xD3, 45, 127, 0xB1),
+  },
+  voicegroup = 1,
+}, leadVoicegroups, { voicegroupId = 1 })[1]
+local leadWaveLevel
+for _, channel in ipairs(leadSpec.channels) do
+  for _, event in ipairs(channel.program) do
+    if event.notetype and event.notetype.waveLevel then
+      leadWaveLevel = event.notetype.waveLevel
+      break
+    end
+  end
+end
+eq(leadWaveLevel, 1, "sparse wave lead reaches full wave level")
 
 -- Cache index voicegroupId wins over the ROM pointer in song.voicegroup.
 -- Otherwise every tone lookup misses and all instruments share one envelope.
@@ -384,10 +416,76 @@ local envelopeSpec = mix.buildSpecs({
   voicegroup = 999,
 }, envelopeVoicegroups, { voicegroupId = 1 })[1]
 local envelopeFade
-for _, event in ipairs(envelopeSpec.channels[1].program) do
-  if event.notetype then envelopeFade = event.notetype.fade break end
+for _, channel in ipairs(envelopeSpec.channels) do
+  for _, event in ipairs(channel.program) do
+    if event.notetype and event.notetype.fade ~= nil then
+      envelopeFade = event.notetype.fade
+      break
+    end
+  end
 end
 eq(envelopeFade, -1, "index voicegroupId selects instrument envelope")
+
+-- GBA wave RAM is 0..15 while ChipSynth expects -1..1 samples, and the first
+-- custom wave must be instrument 4 (after the four built-in waves).
+local rawWave = {}
+for i = 1, 32 do rawWave[i] = (i - 1) % 16 end
+local customWaveVg = {
+  [1] = { [1] = { type = 3, wave = rawWave } },
+}
+local customWaveSpec = mix.buildSpecs({
+  tracks = 1,
+  trackData = { string.char(0xBD, 1, 0xD3, 60, 100, 0xB1) },
+  voicegroup = 1,
+}, customWaveVg, { voicegroupId = 1 })[1]
+local customInstrument
+for _, channel in ipairs(customWaveSpec.channels) do
+  for _, event in ipairs(channel.program) do
+    if event.notetype and event.notetype.waveInstrument then
+      customInstrument = event.notetype.waveInstrument
+    end
+  end
+end
+eq(customInstrument, 4, "first custom wave uses 0-based instrument index")
+eq(customWaveSpec.waves[5][1], -1, "custom wave normalizes low nibble")
+assert(math.abs(customWaveSpec.waves[5][16] - 1) < 0.001,
+  "custom wave normalizes high nibble")
+
+-- Mixed voices in one spec must reach different GB hardware instead of
+-- collapsing to each track's dominant kind.
+local mixedVg = {
+  [1] = {
+    [1] = { type = 1, attack = 0, decay = 0, sustain = 15 },
+    [2] = { type = 3, wave = rawWave },
+  },
+}
+local mixedSpec = mix.buildSpecs({
+  tracks = 2,
+  trackData = {
+    string.char(0xBD, 1, 0xD3, 60, 100, 0xB1),
+    string.char(0xBD, 2, 0xD3, 67, 100, 0xB1),
+  },
+  voicegroup = 1,
+}, mixedVg, { voicegroupId = 1 })[1]
+local pulseHw, waveHw
+for _, channel in ipairs(mixedSpec.channels) do
+  for _, event in ipairs(channel.program) do
+    if event.notetype and event.notetype.volume then pulseHw = channel.hw end
+    if event.notetype and event.notetype.waveLevel then waveHw = channel.hw end
+  end
+end
+assert(pulseHw and waveHw, "mixed pulse and wave notes both survive")
+assert(pulseHw ~= waveHw, "mixed notes use different hardware")
+assert(type(mixedSpec.gain) == "number" and mixedSpec.gain > 0
+  and mixedSpec.gain < 1, "side spec gain is scaled")
+
+-- Slow MP2K attack is approximated by a GB swell with wide duty.
+local slowAttackVolume, slowAttackFade, slowAttackDuty =
+  mix.envelopeFor({ vel = 100, volume = 100,
+    tone = { attack = 5, decay = 1, sustain = 15 } }, 2)
+eq(slowAttackFade, -2, "slow attack swells")
+eq(slowAttackDuty, 3, "slow attack uses wide duty")
+assert(slowAttackVolume > 0, "slow attack keeps audible volume")
 
 -- Gen1/Gen2 hosts deny engine game3 modules. Conversion still works with the
 -- static song map and local M4A header parser.

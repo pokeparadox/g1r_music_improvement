@@ -166,6 +166,7 @@ return function(mod)
         if okSong and type(song) == "table" and type(song.chip) == "table" then
           song.generation = 1
           if spec.pan then song.pan = spec.pan end
+          if spec.gain then song.gain = spec.gain end
           extraSong[side] = song
         end
       end

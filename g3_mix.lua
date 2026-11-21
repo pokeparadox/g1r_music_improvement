@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 1
+local CONVERTER_VERSION = 3
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -497,15 +497,30 @@ local function toneInfo(voicegroups, vgId, note, specWaves)
   if kind == 3 then
     local wave = tone and tone.wave
     if specWaves and type(wave) == "table" and #wave >= 32 then
-      local signature = {}
-      for i = 1, 32 do signature[i] = tostring(tonumber(wave[i]) or 0) end
+      local signature, min, max = {}, 0, 0
+      for i = 1, 32 do
+        local n = tonumber(wave[i]) or 0
+        signature[i] = tostring(n)
+        if n < min then min = n end
+        if n > max then max = n end
+      end
       signature = table.concat(signature, ",")
       for index, existing in ipairs(specWaves) do
-        if existing.signature == signature then return kind, 0, #WAVES + index, tone end
+        if existing.signature == signature then
+          return kind, 0, #WAVES + index - 1, tone
+        end
       end
       if #specWaves < 12 then
-        specWaves[#specWaves + 1] = { signature = signature, wave = wave }
-        return kind, 0, #WAVES + #specWaves, tone
+        local normalized = {}
+        -- Cached GBA wave RAM is 0..15, but ChipSynth expects -1..1 samples.
+        -- Fixtures already using signed samples stay as-is.
+        local scale = min >= 0 and max > 1
+        for i = 1, #wave do
+          local n = tonumber(wave[i]) or 0
+          normalized[i] = scale and math.max(-1, math.min(1, n / 7.5 - 1)) or n
+        end
+        specWaves[#specWaves + 1] = { signature = signature, wave = normalized }
+        return kind, 0, #WAVES + #specWaves - 1, tone
       end
     end
     local waveIndex = 0
@@ -530,15 +545,33 @@ local function gbTempo(tempo)
   return value
 end
 
-local function roleFor(kind, used)
-  local order
-  if kind == 4 then order = { 4, 1, 2, 3 }
-  elseif kind == 3 then order = { 3, 1, 2, 4 }
-  else order = { 1, 2, 3, 4 } end
-  for _, hw in ipairs(order) do
-    if not used[hw] then used[hw] = true return hw end
+local function noteGain(note)
+  local gain = (tonumber(note.vel) or 100) / 127 *
+    (tonumber(note.volume) or 100) / 255
+  return math.sqrt(math.max(0, math.min(1, gain)))
+end
+
+local function medianGain(values)
+  if #values == 0 then return 0.7 end
+  table.sort(values)
+  if #values % 2 == 0 then
+    return (values[#values / 2] + values[#values / 2 + 1]) / 2
   end
-  return 1
+  return values[(#values + 1) / 2]
+end
+
+-- Side engines have a fixed master gain; scale them per song so dense harmony
+-- and drum tracks do not bury the lead.  Slot 1 of each spec is lead-like.
+local function trackGain(notes, dominant, slot, lastTick)
+  local values = {}
+  for _, note in ipairs(notes) do values[#values + 1] = note.gain end
+  local gain = medianGain(values)
+  if dominant == 4 then gain = gain * 0.75
+  elseif slot > 1 then gain = gain * 0.85 end
+  if #notes > 0 and #notes / math.max(1, lastTick) > 0.02 then
+    gain = gain * 0.9
+  end
+  return math.max(0.35, math.min(1, gain))
 end
 
 local function emitRest(program, ticks)
@@ -563,25 +596,34 @@ function M.envelopeFor(note, duty)
   -- Seq.trackVolume gives ~vel*volume/33025 mono gain.  GB volume steps are
   -- roughly 1.5 dB, so map gain through sqrt instead of a linear product;
   -- the linear form crushed quiet tracks into buckets 0-2.
+  -- Sparse wave melodies carry a small boost; full pulse backing needs none.
   local gain = math.max(0, math.min(1,
-    (note.vel or 100) / 127 * (note.volume or 100) / 255))
+    (note.vel or 100) / 127 * (note.volume or 100) / 255 *
+    math.max(1, tonumber(note.gainScale) or 1)))
   local volume = math.max(0, math.min(15,
     math.floor(math.sqrt(gain) * 15 + 0.5)))
-  local attack, decay, sustain = value("attack"), value("decay"), value("sustain")
+  local attack = tonumber(value("attack")) or 0
+  local decay = tonumber(value("decay")) or 0
+  local sustain = tonumber(value("sustain")) or 15
   local fade, resolvedDuty = 0, duty or 2
   if note.drumPreset then
     fade = note.drumPreset.fade or 0
     resolvedDuty = note.drumPreset.duty or resolvedDuty
-  elseif (sustain and sustain < 8) or (decay and decay >= 10) then
+  elseif sustain < 8 or decay >= 10 then
     -- Pluck/percussion: steep decay, thin duty for bite.
     fade, resolvedDuty = 5, 1
-  elseif sustain and sustain < 12 then
+  elseif sustain < 12 then
     fade, resolvedDuty = 3, 2
-  elseif attack and attack <= 1 and sustain and sustain >= 12
-      and (decay or 0) <= 4 then
+  elseif attack >= 4 then
+    -- Slow attack cannot be expressed as a GB attack ramp; a swell (negative
+    -- fade) with wide duty is the closest available brightness.
+    fade, resolvedDuty = -2, 3
+  elseif attack <= 1 and sustain >= 12 and decay <= 4 then
     -- Slow strings/brass: slight swell, 50% duty.
     fade, resolvedDuty = -1, 3
-  elseif decay and decay > 0 then
+  elseif sustain >= 13 then
+    fade, resolvedDuty = -1, 3
+  elseif decay > 0 then
     fade = 1
   end
   return volume, math.max(-7, math.min(7, fade)), resolvedDuty
@@ -631,7 +673,9 @@ local function emitNote(program, note, hw, kind, duty, waveIndex, withNotetype)
     if withNotetype ~= false then
       -- ChipSynth wave level 3 is quarter amplitude.  Fixed level 3 made
       -- every wave instrument inaudible next to the pulse tracks.
-      local waveLevel = volume >= 10 and 1 or (volume >= 6 and 2 or 3)
+      -- Wave level 2 is half amplitude; start full one step earlier so low
+      -- M4A melody volumes stay audible beside full-level pulse backing.
+      local waveLevel = volume >= 7 and 1 or (volume >= 4 and 2 or 3)
       program[#program + 1] = {
         notetype = { speed = speed, waveLevel = waveLevel, waveInstrument = waveIndex or 0 },
       }
@@ -651,6 +695,29 @@ local function emitNote(program, note, hw, kind, duty, waveIndex, withNotetype)
     program[#program + 1] = { pitch = pitch, len = chunk }
     remaining = remaining - chunk
   end
+end
+
+-- Route each note to the closest GB hardware instead of locking a whole track
+-- to one duty.  When no compatible channel is free, delay it to the earliest
+-- one rather than letting two programs write past the same timeline position.
+local function allocateHw(kind, start, gate, busyUntil)
+  local order
+  if kind == 4 then order = { 4, 3, 1, 2 }
+  elseif kind == 3 then order = { 3, 1, 2, 4 }
+  else order = { 1, 2, 3, 4 } end
+  local best, bestUntil
+  for _, hw in ipairs(order) do
+    local untilTick = busyUntil[hw] or 0
+    if untilTick <= start then
+      busyUntil[hw] = start + gate
+      return hw, start
+    end
+    if not bestUntil or untilTick < bestUntil then
+      best, bestUntil = hw, untilTick
+    end
+  end
+  busyUntil[best] = bestUntil + gate
+  return best, bestUntil
 end
 
 function M.buildSpecs(song, voicegroups, info)
@@ -698,25 +765,7 @@ function M.buildSpecs(song, voicegroups, info)
     baseTempo = tempoTimeline[1].tempo or baseTempo
   end
 
-  local function dominantKind(track)
-    local kinds = {}
-    for _, event in ipairs(track.events) do
-      if event.kind == "note" then
-        local kind = toneInfo(voicegroups, vgId, event)
-        kinds[kind] = (kinds[kind] or 0) + 1
-      end
-    end
-    local dominant, best = 1, 0
-    for kind, count in pairs(kinds) do
-      if count > best then dominant, best = kind, count end
-    end
-    return dominant
-  end
-
-  local function buildProgram(track, hw, specWaves)
-    local program = {}
-    local panSum, panCount = 0, 0
-    local cursor, currentTempo = 0, baseTempo
+  local function analyzeTrack(track, specWaves)
     -- A new note on the same M4A track or an ENDTIE cuts the previous voice.
     -- Clamp gate to the next cut so note spacing matches the source sequence.
     local gates = {}
@@ -735,6 +784,7 @@ function M.buildSpecs(song, voicegroups, info)
         nextNoteTick = event.tick
       end
     end
+    local panSum, panCount = 0, 0
     for _, event in ipairs(track.events) do
       if event.kind == "note" then
         panSum = panSum + (event.pan or 0x40)
@@ -747,46 +797,18 @@ function M.buildSpecs(song, voicegroups, info)
     for _, event in ipairs(track.events) do
       if event.kind == "pitch" then pitchEvents[#pitchEvents + 1] = event end
     end
-    -- Merge the song-wide tempo timeline into this channel's own events.
-    -- Tempo changes always come first at a given tick so all engines change
-    -- speed on the same event, matching the native M4A sequencer.
-    local events = {}
+    local notes, kinds = {}, {}
+    local keySum, keyCount = 0, 0
     for index, event in ipairs(track.events) do
-      if event.kind ~= "tempo" then
-        local copy = {}
-        for key, value in pairs(event) do copy[key] = value end
-        copy._index = index
-        events[#events + 1] = copy
-      end
-    end
-    for _, tempo in ipairs(tempoTimeline) do
-      events[#events + 1] = {
-        kind = "tempo", tick = tempo.tick, tempo = tempo.tempo, seq = -1,
-      }
-    end
-    table.sort(events, function(a, b)
-      if a.tick ~= b.tick then return a.tick < b.tick end
-      if (a.kind == "tempo") ~= (b.kind == "tempo") then
-        return a.kind == "tempo"
-      end
-      return (a.seq or 0) < (b.seq or 0)
-    end)
-
-    local eventProgramIndex = {}
-    for index, event in ipairs(events) do
-      if event.tick > cursor then
-        emitRest(program, event.tick - cursor)
-        cursor = event.tick
-      end
-      eventProgramIndex[index] = #program + 1
-      if event.kind == "tempo" then
-        currentTempo = event.tempo or currentTempo
-        -- tick 0 is already written by ChipAsm's tempo prelude.
-        if event.tick > 0 then program[#program + 1] = { tempo = gbTempo(currentTempo) } end
-      elseif event.kind == "note" then
+      if event.kind == "note" then
         local kind, duty, waveIndex, tone = toneInfo(voicegroups, vgId, event, specWaves)
+        local noteKey = tonumber(event.key) or 0
+        if noteKey > 0 then
+          keySum = keySum + noteKey
+          keyCount = keyCount + 1
+        end
         event.tone = tone
-        local gate = gates[event._index or index] or event.gate or 1
+        local gate = gates[index] or event.gate or 1
         -- Split at BEND/TUNE changes so pitch glides are approximated without
         -- retriggering the envelope on each tied segment.
         local boundaries = { { tick = event.tick, key = event.key } }
@@ -800,62 +822,167 @@ function M.buildSpecs(song, voicegroups, info)
           end
         end
         boundaries[#boundaries + 1] = { tick = event.tick + gate }
+        local segments = {}
         for part = 1, #boundaries - 1 do
-          local note = {}
-          for key, value in pairs(event) do note[key] = value end
-          note.gate = boundaries[part + 1].tick - boundaries[part].tick
-          note.key = boundaries[part].key
-          emitNote(program, note, hw, kind, duty, waveIndex, part == 1)
+          local copy = {}
+          for key, value in pairs(event) do copy[key] = value end
+          copy.gate = boundaries[part + 1].tick - boundaries[part].tick
+          copy.key = boundaries[part].key
+          copy.tick = boundaries[part].tick
+          segments[part] = copy
         end
-        cursor = math.max(cursor, event.tick + gate)
+        notes[#notes + 1] = {
+          index = index, start = event.tick, gate = gate, kind = kind,
+          duty = duty, waveIndex = waveIndex, gain = noteGain(event),
+          segments = segments,
+        }
+        kinds[kind] = (kinds[kind] or 0) + 1
       end
     end
-    if #program == 0 then emitRest(program, 16) end
-    if cursor < globalLoopTick then
-      emitRest(program, globalLoopTick - cursor)
-      cursor = globalLoopTick
+    local dominant, best = 1, 0
+    for kind, count in pairs(kinds) do
+      if count > best then dominant, best = kind, count end
     end
-    -- First event at/after loop tick; no event exactly on tick is common
-    -- when loop falls inside a rest run.
-    local loopTarget = #program + 1
-    for index, event in ipairs(events) do
-      if event.tick >= globalLoopTick then
-        loopTarget = eventProgramIndex[index]
-        break
-      end
-    end
-    if cursor < lastTick then emitRest(program, lastTick - cursor) end
-    -- Every engine repeats from the same timeline position.  Native M4A
-    -- tracks may start their loop at different event indices; per-track loop
-    -- markers desync the extra chips from the base song.
-    program[#program + 1] = { loop = { count = 0, to = loopTarget } }
-    return program
+    return {
+      notes = notes, dominant = dominant,
+      avgKey = keyCount > 0 and keySum / keyCount or 0,
+    }
   end
 
   local specs = {}
   for start = 1, #decoded, 4 do
-    local used, channels, assignments = {}, {}, {}
+    local analyses, specWaves = {}, {}
     for i = start, math.min(start + 3, #decoded) do
-      local dominant = dominantKind(decoded[i])
-      local hw = roleFor(dominant, used)
-      assignments[#assignments + 1] = { track = decoded[i], dominant = dominant, hw = hw }
-      channels[#channels + 1] = { hw = hw }
+      analyses[#analyses + 1] = analyzeTrack(decoded[i], specWaves)
     end
-    local specWaves = {}
-    for index, item in ipairs(assignments) do
-      channels[index].program = buildProgram(item.track, item.hw, specWaves)
+    -- Sparse high wave tracks are melodies.  Boost them inside the shared
+    -- program; full-scale pulse backing needs no extra gain.
+    local leadIndex, leadScore
+    for index, analysis in ipairs(analyses) do
+      if analysis.dominant == 3 and analysis.avgKey >= 55
+          and #analysis.notes <= 160 then
+        local score = analysis.avgKey - #analysis.notes * 0.02
+        if not leadScore or score > leadScore then
+          leadIndex, leadScore = index, score
+        end
+      end
     end
+    if leadIndex then
+      for _, note in ipairs(analyses[leadIndex].notes) do
+        note.gainScale = 1.4
+        for _, segment in ipairs(note.segments) do
+          segment.gainScale = 1.4
+        end
+      end
+    end
+    local actions = {}
+    for _, tempo in ipairs(tempoTimeline) do
+      if tempo.tick > 0 then
+        actions[#actions + 1] = {
+          tick = tempo.tick, all = true, order = -1, tempo = tempo.tempo,
+        }
+      end
+    end
+    for trackIndex, analysis in ipairs(analyses) do
+      for _, note in ipairs(analysis.notes) do
+        actions[#actions + 1] = {
+          tick = note.start, all = false, trackIndex = trackIndex,
+          order = note.index, note = note,
+        }
+      end
+    end
+    table.sort(actions, function(a, b)
+      if a.tick ~= b.tick then return a.tick < b.tick end
+      if a.all ~= b.all then return a.all == true end
+      if a.trackIndex ~= b.trackIndex then
+        return (a.trackIndex or 0) < (b.trackIndex or 0)
+      end
+      return (a.order or 0) < (b.order or 0)
+    end)
+
+    local programs, cursors = {}, {}
+    for hw = 1, 4 do programs[hw], cursors[hw] = {}, 0 end
+    local busyUntil = { [1] = 0, [2] = 0, [3] = 0, [4] = 0 }
+    local loopTargets
+    for _, action in ipairs(actions) do
+      if not loopTargets and action.tick >= globalLoopTick then
+        loopTargets = {}
+        for hw = 1, 4 do
+          if cursors[hw] < globalLoopTick then
+            emitRest(programs[hw], globalLoopTick - cursors[hw])
+            cursors[hw] = globalLoopTick
+          end
+          loopTargets[hw] = #programs[hw] + 1
+        end
+      end
+      for hw = 1, 4 do
+        if cursors[hw] < action.tick then
+          emitRest(programs[hw], action.tick - cursors[hw])
+          cursors[hw] = action.tick
+        end
+      end
+      if action.all then
+        for hw = 1, 4 do
+          programs[hw][#programs[hw] + 1] = { tempo = gbTempo(action.tempo) }
+        end
+      else
+        local note = action.note
+        local original = note.start
+        local hw, assigned = allocateHw(note.kind, original, note.gate, busyUntil)
+        if assigned > original then
+          local delay = assigned - original
+          note.start = assigned
+          for _, segment in ipairs(note.segments) do segment.tick = segment.tick + delay end
+        end
+        if cursors[hw] < assigned then
+          emitRest(programs[hw], assigned - cursors[hw])
+          cursors[hw] = assigned
+        end
+        for part, segment in ipairs(note.segments) do
+          emitNote(programs[hw], segment, hw, note.kind, note.duty,
+            note.waveIndex, part == 1)
+        end
+        cursors[hw] = assigned + note.gate
+      end
+    end
+    if not loopTargets then
+      loopTargets = {}
+      for hw = 1, 4 do
+        if cursors[hw] < globalLoopTick then
+          emitRest(programs[hw], globalLoopTick - cursors[hw])
+          cursors[hw] = globalLoopTick
+        end
+        loopTargets[hw] = #programs[hw] + 1
+      end
+    end
+    for hw = 1, 4 do
+      if cursors[hw] < lastTick then emitRest(programs[hw], lastTick - cursors[hw]) end
+      programs[hw][#programs[hw] + 1] = {
+        loop = { count = 0, to = loopTargets[hw] },
+      }
+    end
+
     local waves = {}
     for index, wave in ipairs(WAVES) do waves[index] = wave end
     for _, entry in ipairs(specWaves) do
       if #waves < 15 then waves[#waves + 1] = entry.wave end
     end
+    local gainSum, gainCount = 0, 0
+    for slot, analysis in ipairs(analyses) do
+      if #analysis.notes > 0 then
+        gainSum = gainSum + trackGain(analysis.notes, analysis.dominant, slot, lastTick)
+        gainCount = gainCount + 1
+      end
+    end
+    local channels = {}
+    for hw = 1, 4 do channels[#channels + 1] = { hw = hw, program = programs[hw] } end
     specs[#specs + 1] = {
       tempo = gbTempo(baseTempo),
       channels = channels,
       waves = waves,
       drums = DRUMS,
       engine = 1,
+      gain = gainCount > 0 and gainSum / gainCount or 1,
     }
   end
   -- Extra chips inherit the average pan of the tracks they carry, instead of

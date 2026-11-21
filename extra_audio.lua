@@ -25,6 +25,7 @@ return function()
     engines = {},
     envelopes = {},
     pans = {},
+    gains = {},
     sideEnabled = { left = true, center = true, right = true },
     source = nil,
     extraGain = 0.35,
@@ -75,6 +76,7 @@ return function()
     state.engines = {}
     state.envelopes = {}
     state.pans = {}
+    state.gains = {}
     state.extraRendered = 0
     state.baseElapsed = 0
     state.baseLastClock = 0
@@ -151,7 +153,8 @@ return function()
           local okPtr, p = pcall(ChipSynth._int16Pointer, sd)
           if okPtr then ptr = p end
         end
-        local gain = state.extraGain * state.musicVolume * dynGain
+        local songGain = state.gains[side] or 1
+        local gain = state.extraGain * state.musicVolume * dynGain * songGain
         for i = 0, chunk - 1 do
           local sample = 0
           if ptr then
@@ -296,6 +299,8 @@ return function()
             pan = side == "left" and -0.6 or side == "right" and 0.6 or 0
           end
           state.pans[side] = math.max(-1, math.min(1, pan))
+          state.gains[side] = math.max(0, math.min(1,
+            tonumber(sideSong.gain) or 1))
           if type(sideSong.intensityEnvelope) == "table" then
             state.envelopes[side] = sideSong.intensityEnvelope
           end
