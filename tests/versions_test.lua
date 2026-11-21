@@ -31,6 +31,28 @@ assert(V.variantLabel("g2_improved") == "G2E")
 assert(V.variantLabel({ id = "Music_MixCities1_firered" }) == "G3 Mix")
 assert(V.variantLabel({ native = true, generation = 3 }) == "G3")
 
+-- RSE aliases normalise to the canonical FRLG label before mix lookup.
+assert(V.canonicalGen3Label("MUS_RG_PALLET") == "MUS_PALLET")
+assert(V.canonicalGen3Label("MUS_GSC_PEWTER") == "MUS_PEWTER")
+assert(V.canonicalGen3Label("MUS_GSC_ROUTE38") == "MUS_ROUTE37")
+assert(V.canonicalGen3Label("MUS_RG_NOPE") == "MUS_RG_NOPE")
+assert(V.nameFor("MUS_RG_PALLET") == "Pallet Town")
+assert(V.groupFor("MUS_GSC_PEWTER") == V.byLabel.MUS_PEWTER)
+assert(table.concat(V.mixLabelsFor("MUS_PALLET", "firered"), ",") == "MUS_PALLET")
+assert(table.concat(V.mixLabelsFor("MUS_PALLET", "emerald"), ",")
+  == "MUS_RG_PALLET,MUS_PALLET")
+assert(table.concat(V.mixLabelsFor("MUS_PEWTER", "ruby"), ",")
+  == "MUS_PEWTER,MUS_GSC_PEWTER")
+assert(table.concat(V.mixLabelsFor("MUS_GSC_ROUTE38", "emerald"), ",")
+  == "MUS_RG_ROUTE37,MUS_ROUTE37,MUS_GSC_ROUTE38")
+assert(V.byLabel.MUS_ROUTE37 and V.byLabel.MUS_ROUTE37.gen2 == "Music_Route37")
+assert(V.byLabel.MUS_GSC_RADIO_TOWER_TAKEOVER
+  and V.byLabel.MUS_GSC_RADIO_TOWER_TAKEOVER.gen2 == "Music_LakeOfRageRocketRadio")
+assert(table.concat(V.mixLabelsFor("MUS_GSC_RADIO_TOWER_TAKEOVER", "ruby"), ",")
+  == "MUS_GSC_RADIO_TOWER_TAKEOVER")
+assert(V.mixAllowed(V.byLabel.MUS_GSC_RADIO_TOWER_TAKEOVER, 2)
+  and not V.mixAllowed(V.byLabel.MUS_GSC_RADIO_TOWER_TAKEOVER, 1))
+
 -- G3 Mix title exists on RBY but clashes with GSC title screen.
 assert(not V.mixAllowed(nil, 2), "GBA-only labels skip Mix on Gen2")
 assert(V.mixAllowed(V.byLabel.Music_TitleScreen, 1), "RBY keeps Mix title")

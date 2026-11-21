@@ -52,6 +52,10 @@ M.EQUIVALENTS = {
     name = "Route 2" },
   { gen1 = "Music_Routes3", gen2 = "Music_Route3", gen3 = "MUS_ROUTE3",
     name = "Route 3" },
+  -- Gen2-only songs with GSC arrangements shipped in RSE.
+  { gen2 = "Music_Route37", gen3 = "MUS_ROUTE37", name = "Route 37" },
+  { gen2 = "Music_LakeOfRageRocketRadio",
+    gen3 = "MUS_GSC_RADIO_TOWER_TAKEOVER", name = "Rocket Radio" },
   { gen1 = "Music_Routes4", gen2 = "Music_Route12", name = "Route 12" },
   { gen1 = "Music_Gym", gen2 = "Music_Gym", gen3 = "MUS_GYM", name = "Gym" },
   { gen1 = "Music_GymLeaderBattle", gen2 = "Music_KantoGymBattle", gen3 = "MUS_VS_GYM_LEADER",
@@ -122,8 +126,52 @@ for _, group in ipairs(M.EQUIVALENTS) do
   end
 end
 
+-- Emerald embeds the whole FRLG score as MUS_RG_*; RSE also ship two GSC
+-- bonus tracks as MUS_GSC_*.  Normalise those back to the canonical FRLG
+-- label so every source files under the same native song.
+local GEN3_ALIAS_TO = {
+  MUS_GSC_PEWTER = "MUS_PEWTER",
+  MUS_GSC_ROUTE38 = "MUS_ROUTE37",
+}
+local GEN3_ALIAS_FROM = {}
+for alias, canonical in pairs(GEN3_ALIAS_TO) do
+  local list = GEN3_ALIAS_FROM[canonical]
+  if not list then list = {}; GEN3_ALIAS_FROM[canonical] = list end
+  list[#list + 1] = alias
+end
+
+function M.canonicalGen3Label(label)
+  if type(label) ~= "string" then return label end
+  local direct = GEN3_ALIAS_TO[label]
+  if direct then return direct end
+  local suffix = label:match("^MUS_RG_(.+)$")
+  if suffix then
+    local canonical = "MUS_" .. suffix
+    if M.byLabel[canonical] then return canonical end
+  end
+  return label
+end
+
+-- Ordered labels to try when looking for a G3 Mix source on `version`.
+-- Same bytes across versions dedupe by content hash; distinct arrangements
+-- stay as distinct variants.
+function M.mixLabelsFor(label, version)
+  label = M.canonicalGen3Label(label)
+  local out = {}
+  if type(label) ~= "string" then return out end
+  local suffix = label:match("^MUS_(.+)$")
+  if version == "emerald" and suffix then
+    out[#out + 1] = "MUS_RG_" .. suffix
+  end
+  out[#out + 1] = label
+  for _, alias in ipairs(GEN3_ALIAS_FROM[label] or {}) do
+    out[#out + 1] = alias
+  end
+  return out
+end
+
 function M.groupFor(label)
-  return M.byLabel[label]
+  return M.byLabel[M.canonicalGen3Label(label)]
 end
 
 function M.labelFor(group, generation)
@@ -139,7 +187,7 @@ end
 
 -- Canonical name for a dataset label.  Falls back to the pretty-printed id.
 function M.nameFor(label)
-  local group = M.byLabel[label]
+  local group = M.byLabel[M.canonicalGen3Label(label)]
   if group then return group.name end
   label = tostring(label or "")
   if label:match("^MUS_") then
