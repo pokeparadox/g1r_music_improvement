@@ -897,9 +897,10 @@ return function(mod)
       end
     end
     if mixCandidatesFor then
-      local group = versions.byLabel[nativeId]
+      local canonical = versions.canonicalGen3Label(nativeId)
+      local group = versions.byLabel[canonical]
       local label = group and group.gen3
-        or (tostring(nativeId):match("^MUS_") and nativeId or nil)
+        or (tostring(canonical):match("^MUS_") and canonical or nil)
       if label and versions.mixAllowed(group, hostGeneration) then
         for _, candidate in ipairs(mixCandidatesFor(label)) do
           list[#list + 1] = candidate
@@ -1215,10 +1216,15 @@ return function(mod)
   mixCandidatesFor = function(label)
     local out = {}
     for _, entry in ipairs(versions.VERSIONS) do
-      if entry.generation == 3 and g3Mix.has(entry.id, label) then
-        out[#out + 1] = {
-          version = entry.id, generation = 3, label = label, mix = true,
-        }
+      if entry.generation == 3 then
+        for _, candidateLabel in ipairs(versions.mixLabelsFor(label, entry.id)) do
+          if g3Mix.has(entry.id, candidateLabel) then
+            out[#out + 1] = {
+              version = entry.id, generation = 3, label = candidateLabel, mix = true,
+            }
+            break
+          end
+        end
       end
     end
     return out
@@ -1229,7 +1235,8 @@ return function(mod)
     local seen, labels = {}, {}
     for _, entry in ipairs(versions.VERSIONS) do
       if entry.generation == 3 then
-        for _, label in ipairs(g3Mix.songList(entry.id)) do
+        for _, raw in ipairs(g3Mix.songList(entry.id)) do
+          local label = versions.canonicalGen3Label(raw)
           if not seen[label] then seen[label] = true labels[#labels + 1] = label end
         end
       end
@@ -1333,9 +1340,10 @@ return function(mod)
         if group and group.gen3 then mixNative[group.gen3] = id end
       end
       for _, label in ipairs(mixSongList()) do
-        local nativeId = mixNative[label]
-          or (tostring(label):match("^MUS_") and label or nil)
-        if nativeId and versions.mixAllowed(versions.byLabel[tostring(label)], hostGeneration)
+        local canonical = versions.canonicalGen3Label(label)
+        local nativeId = mixNative[canonical]
+          or (tostring(canonical):match("^MUS_") and canonical or nil)
+        if nativeId and versions.mixAllowed(versions.byLabel[canonical], hostGeneration)
           and not variantSeen[nativeId] then
           variantSeen[nativeId] = true
           variantIds[#variantIds + 1] = nativeId
@@ -2133,8 +2141,9 @@ return function(mod)
       end
     end
     for _, label in ipairs(mixSongList()) do
-      local group = versions.byLabel[label]
-      local nativeId = (group and group["gen" .. hostGen]) or label
+      local canonical = versions.canonicalGen3Label(label)
+      local group = versions.byLabel[canonical]
+      local nativeId = (group and group["gen" .. hostGen]) or canonical
       if versions.mixAllowed(group, hostGen) and not seen[nativeId] then
         local variants = {}
         for _, record in ipairs(variantMap[nativeId] or {}) do
@@ -2147,7 +2156,7 @@ return function(mod)
           end
         end
         if #variants == 0 then
-          for _, candidate in ipairs(mixCandidatesFor(label)) do
+          for _, candidate in ipairs(mixCandidatesFor(canonical)) do
             variants[#variants + 1] = {
               candidate = candidate, mix = true, improved = true,
               generation = 3, version = candidate.version,
