@@ -53,6 +53,9 @@ return function(mod)
   if not profiles then return end
   local musicMenu = loadModFile("music_menu.lua")
   if musicMenu and musicMenu.setVersions then musicMenu.setVersions(versions) end
+  local omniUi = loadModFile("omni_ui.lua")
+  if omniUi and omniUi.install then pcall(omniUi.install) end
+  local function omniActive() return omniUi ~= nil and omniUi.isActive() == true end
   local g3Mix = loadModFile("g3_mix.lua")
   local g3SongIds = loadModFile("g3_song_ids.lua")
   if g3Mix and g3Mix.setSongIds and g3SongIds then
@@ -1621,7 +1624,7 @@ return function(mod)
         { label = "YES", value = "yes" },
         { label = "NO", value = "no" },
       }
-      return mod.ui.ListMenu.new(game, "ENHANCE MUSIC?", items, {
+      local menu = mod.ui.ListMenu.new(game, "ENHANCE MUSIC?", items, {
         onChoose = function(item)
           if item.value == "yes" then
             state.confirmed = true
@@ -1643,6 +1646,8 @@ return function(mod)
           state.confirmInstance = nil
         end,
       })
+      menu.g1rMusicScreen = "confirm"
+      return menu
     end,
   })
 
@@ -1650,6 +1655,7 @@ return function(mod)
     new = function(game)
       local inst = {
         game = game,
+        g1rMusicScreen = "progress",
         progress = completed,
         total = total,
         isOpaque = true,
@@ -1706,16 +1712,19 @@ return function(mod)
         onCancel = function()
           require("src.core.Music").stop()
         end,
-        footer = "LEFT/RIGHT VARIANT\nA PLAY B BACK",
-        rows = 6,
+        footer = omniActive() and "L/R VARIANT\nA PLAY  B BACK"
+          or "LEFT/RIGHT VARIANT\nA PLAY B BACK",
+        rows = omniActive() and 16 or 6,
       })
+      menu.g1rMusicScreen = "jukebox"
       local baseUpdate = menu.update
       menu.update = function(self, dt)
         local input = self.game and self.game.input
         local item = self.items[self.index]
         if input and item and item.entry then
-          if input:wasPressed("left") or input:wasPressed("right") then
-            local dir = input:wasPressed("left") and -1 or 1
+          if input:wasPressed("left") or input:wasPressed("l")
+              or input:wasPressed("right") or input:wasPressed("r") then
+            local dir = (input:wasPressed("left") or input:wasPressed("l")) and -1 or 1
             local variant = musicMenu.cycle(item.entry, item.versionKey, dir)
             if variant then
               item.variant = variant
@@ -1771,8 +1780,9 @@ return function(mod)
         onChoose = function() end,
         onCancel = function() end,
         footer = "A TOGGLE\nB DONE",
-        rows = 5,
+        rows = omniActive() and 16 or 5,
       })
+      menu.g1rMusicScreen = "sources"
       local baseUpdate = menu.update
       menu.update = function(self, dt)
         local input = self.game and self.game.input
@@ -2210,8 +2220,10 @@ return function(mod)
     if not ui then return false end
     local items = sourceItems(game)
     return ui.openList(game, {
+      screenKind = "sources",
       title = "MUSIC SOURCES",
       items = items,
+      visible = omniActive() and 16 or nil,
       stayOpen = true,
       hint = { "A TOGGLE  B BACK" },
       onChoose = function(item)
@@ -2232,10 +2244,14 @@ return function(mod)
     end
     local menu
     menu = ui.openList(game, {
+      screenKind = "jukebox",
       title = musicMenu.title(),
       items = items,
+      visible = omniActive() and 16 or nil,
       stayOpen = true,
-      hint = { "LEFT/RIGHT VARIANT", "A PLAY  B BACK" },
+      hint = omniActive()
+        and { "L/R VARIANT", "A PLAY  B BACK" }
+        or { "LEFT/RIGHT VARIANT", "A PLAY  B BACK" },
       onChoose = function(item) musicTestPlay(game, item) end,
       onCycle = function(item, dir)
         local variant = musicMenu.cycle(item.entry, item.versionKey, dir)
@@ -2261,6 +2277,7 @@ return function(mod)
     local ui = gen3Ui()
     if not ui then return false end
     return ui.openList(game, {
+      screenKind = "confirm",
       title = "ENHANCE MUSIC?",
       items = { { label = "YES", value = true }, { label = "NO", value = false } },
       onChoose = function(item)
@@ -2431,9 +2448,14 @@ return function(mod)
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     if type(next) == "function" then pcall(next, game, viewport) end
     if not toast.text or (toast.until_ or 0) < os.clock() then return end
+    local w, h = viewport and viewport.width, viewport and viewport.height
+    if omniUi and omniActive() and omniUi.drawToast then
+      local ok, drawn = pcall(omniUi.drawToast, toast.text, w, h)
+      if ok and drawn then return end
+    end
     if type(love) ~= "table" or type(love.graphics) ~= "table" then return end
-    local w = (viewport and viewport.width) or love.graphics.getWidth()
-    local h = (viewport and viewport.height) or love.graphics.getHeight()
+    w = w or love.graphics.getWidth()
+    h = h or love.graphics.getHeight()
     local x, y = 8, 8
     love.graphics.push("all")
     local font = love.graphics.getFont()
@@ -2443,7 +2465,7 @@ return function(mod)
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.print(toast.text, x + 6, y + 4)
     love.graphics.pop()
-  end)
+  end, 101)
 
   mod.events:on("game.ready", function(payload)
     local game = payload and (payload.game or payload)
@@ -2510,7 +2532,9 @@ return function(mod)
         if self.stack then
           state.confirmPushed = true
           state.confirmInstance = mod.ui.push(self, "MusicImprovementConfirm")
-        elseif hostIsGen3(self) then
+        elseif hostIsGen3(self) and self.phase == "field" then
+          -- FireRed boots into intro/title/recap first; its modal cannot take
+          -- input until the field owns it, so wait for that phase.
           state.confirmPushed = true
           openGen3Confirm(self)
         end

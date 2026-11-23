@@ -903,6 +903,12 @@ end
 pcall(GbaStack.pop, "music_improvement_menu")
 gbaRun.release()
 
+-- FireRed's first-run prompt waits until the boot/recap sequence is over.
+local mainSource = run.loader.fs.read("mods/g1r_music_improvement/main.lua")
+T.eq(type(mainSource) == "string"
+  and mainSource:find('hostIsGen3(self) and self.phase == "field"', 1, true) ~= nil,
+  true, "Gen3 enhance prompt is gated on the field phase")
+
 -- Gen3 right labels must use the GBA viewport, not the desktop window width.
 local fontKey = "src.ui.game3.frlg_font"
 local previousFont = package.loaded[fontKey]
@@ -937,5 +943,79 @@ if drawMenu then
   T.eq(hintY, 142, "Gen3 hints stay above the GBA bottom edge")
 end
 pcall(GbaStack.pop, "music_improvement_menu")
+
+-- Variant cycling accepts shoulder keys alongside the native arrows.
+local jukeScreen = run.loader.content.screens:get("MusicImprovementJukebox")
+T.eq(type(jukeScreen and jukeScreen.new), "function",
+  "jukebox screen is registered")
+local juke = jukeScreen and jukeScreen.new(run.data)
+local cycleItem
+if juke then
+  for _, item in ipairs(juke.items) do
+    if item.entry and item.entry.variants and #item.entry.variants > 1 then
+      cycleItem = item
+      break
+    end
+  end
+end
+T.eq(cycleItem ~= nil, true, "music test has a multi-variant entry")
+if cycleItem then
+  juke.items = { cycleItem }
+  juke.index = 1
+  local pressed = {}
+  juke.game.input = {
+    wasPressed = function(_, key) return pressed[key] == true end,
+  }
+  for _, key in ipairs({ "l", "r", "left", "right" }) do
+    pressed[key] = true
+    local before = cycleItem.right
+    juke:update(0)
+    T.eq(cycleItem.right ~= before, true,
+      key .. " cycles the selected song variant")
+    pressed[key] = nil
+  end
+end
+
+-- Gen3 modal cycles on shoulders too.
+local cycleDirections = {}
+local cycleMenu = Gen3Ui.openList({}, {
+  title = "MUSIC TEST",
+  items = { { label = "ONE" } },
+  onCycle = function(_, dir) cycleDirections[#cycleDirections + 1] = dir end,
+})
+T.eq(cycleMenu ~= nil, true, "Gen3 cycle modal opens")
+if cycleMenu then
+  cycleMenu.handleInput({ wasPressed = function(_, key) return key == "l" end })
+  cycleMenu.handleInput({ wasPressed = function(_, key) return key == "r" end })
+  T.eq(cycleDirections[1], -1, "Gen3 L shoulder cycles back")
+  T.eq(cycleDirections[2], 1, "Gen3 R shoulder cycles forward")
+  pcall(GbaStack.pop, "music_improvement_menu")
+end
+
+-- With Omni present, menus widen their scroll windows and shorten hints.
+local omniKey = "mods.omni_ui.api.PublicApi"
+local savedOmni = package.loaded[omniKey]
+package.loaded[omniKey] = {
+  Layout = {
+    drawCard = function() end, drawSlot = function() end,
+    drawText = function() end, drawHintBar = function() end,
+    drawProgressBar = function() end, textWidth = function() return 42 end,
+  },
+  Theme = { get = function() return {} end },
+  registerScreen = function() return true end,
+}
+local omniRun = T.sdk.loadMod("mods/g1r_music_improvement", {
+  data = T.fixtures.fresh(), generation = 2,
+})
+local omniJuke = omniRun.loader.content.screens:get("MusicImprovementJukebox")
+local omniJukeMenu = omniJuke and omniJuke.new(omniRun.data)
+T.eq(omniJukeMenu and omniJukeMenu.rows, 16, "Omni jukebox widens rows")
+T.eq(omniJukeMenu and omniJukeMenu.footer:match("L/R VARIANT") ~= nil, true,
+  "Omni jukebox uses shoulder hint")
+local omniSources = omniRun.loader.content.screens:get("MusicImprovementSources")
+T.eq(omniSources and omniSources.new(omniRun.data).rows, 16,
+  "Omni sources widen rows")
+omniRun.release()
+package.loaded[omniKey] = savedOmni
 
 T.finish("g1r_music_improvement")

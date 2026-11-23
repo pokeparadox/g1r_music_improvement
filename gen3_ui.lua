@@ -20,8 +20,10 @@ function M.openList(game, opts)
   opts = opts or {}
   local menu = {
     isMenu = true,
+    g1rMusicScreen = opts.screenKind,
     title = opts.title or "",
     items = opts.items or {},
+    visible = opts.visible or VISIBLE,
     index = 1,
     scroll = 0,
     onChoose = opts.onChoose,
@@ -39,8 +41,9 @@ function M.openList(game, opts)
     if menu.index < 1 then menu.index = 1 end
     if menu.index > n then menu.index = n end
     if menu.index - 1 < menu.scroll then menu.scroll = menu.index - 1 end
-    if menu.index > menu.scroll + VISIBLE then menu.scroll = menu.index - VISIBLE end
-    menu.scroll = math.max(0, math.min(menu.scroll, n - VISIBLE))
+    local visible = menu.visible or VISIBLE
+    if menu.index > menu.scroll + visible then menu.scroll = menu.index - visible end
+    menu.scroll = math.max(0, math.min(menu.scroll, n - visible))
   end
 
   local function drawText(text, x, y, colors)
@@ -104,9 +107,10 @@ function M.openList(game, opts)
     elseif input:wasPressed("down") then
       menu.index = menu.index + 1
       clamp()
-    elseif input:wasPressed("left") or input:wasPressed("right") then
+    elseif input:wasPressed("left") or input:wasPressed("l")
+        or input:wasPressed("right") or input:wasPressed("r") then
       local item = menu.items[menu.index]
-      local dir = input:wasPressed("left") and -1 or 1
+      local dir = (input:wasPressed("left") or input:wasPressed("l")) and -1 or 1
       if item and menu.onCycle then pcall(menu.onCycle, item, dir) end
     elseif input:wasPressed("select") then
       local item = menu.items[menu.index]
@@ -135,6 +139,7 @@ function M.openProgress(game, textFn)
   if not ok or type(Stack) ~= "table" then return nil end
   local menu = {
     isMenu = true,
+    g1rMusicScreen = "progress",
     title = "PREPARING MUSIC",
     progress = 0,
     total = 0,
