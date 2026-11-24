@@ -139,12 +139,13 @@ function M.install(deps)
     end
     if opts.forceVariant then
       local forced = opts.forceVariant
-      local rec = forced.candidate and deps.loadVariant(nativeId, forced.candidate,
-        { enabled = forced.improved, source = "gen1" })
+      local variantNativeId = forced.nativeId or nativeId
+      local rec = forced.candidate and deps.loadVariant(variantNativeId,
+        forced.candidate, { enabled = forced.improved, source = "gen1" })
       pending = nil
       if rec then
         resetBus()
-        if startChip(resolved, nativeId, rec) then return true end
+        if startChip(resolved, variantNativeId, rec) then return true end
       end
       if deps.toast then pcall(deps.toast, nativeId) end
       return originalPlay(id, opts)

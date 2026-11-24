@@ -26,12 +26,16 @@ function synth.soundData(engine, samples)
   return { getSample = function() return 0 end }
 end
 function synth.newBuffer(samples, channels)
-  return {
+  local buffer = {
     samples = samples,
     channels = channels,
-    setSample = function() end,
+    data = {},
   }
+  function buffer:setSample(index, value) self.data[index] = value end
+  synth.buffers[#synth.buffers + 1] = buffer
+  return buffer
 end
+synth.buffers = {}
 
 package.loaded["src.core.ChipSynth"] = synth
 package.loaded["src.core.ChipAudio"] = {
@@ -218,6 +222,63 @@ eq(engine.samples, beforeResync + skipped + 8192,
 check(sources[#sources] ~= stalledSource, "underrun rebuilds the harmony source")
 audio.stop()
 baseSource.playing = true
+
+-- GBA G4 Mix songs can carry many side engines. The GBA profile caps
+-- concurrent engines so ungrouped tracks never overload the mixer.
+now = 800
+baseSource.playing = true
+local gbaAudio = newAudio()
+gbaAudio.setProfile("gba")
+local beforeGbaEngines = #synth.engines
+local gbaSong = {}
+for slot = 1, 20 do
+  gbaSong[slot] = { chip = {} }
+end
+gbaAudio.start(gbaSong, {}, now, true)
+eq(#synth.engines - beforeGbaEngines, 16,
+  "GBA profile caps side engines at 16 slots")
+gbaAudio.stop()
+
+-- Direct PCM voices resolve SWAV samples through the reader supplied by
+-- main.lua and mix into the same GBA side-engine queue.
+synth.buffers = {}
+package.loaded["src.core.ChipAudio"].currentSource =
+  function() return baseSource end
+baseSource.playing = true
+now = 300
+local pcmAudio = newAudio()
+local pcmBytes = {}
+for i = 0, 63 do
+  local value = math.floor(20000 * math.sin(i * math.pi / 16))
+  if value < 0 then value = value + 65536 end
+  pcmBytes[#pcmBytes + 1] = string.char(value % 256, math.floor(value / 256))
+end
+local sampleData = table.concat(pcmBytes)
+pcmAudio.setSampleReader(function()
+  return { data = sampleData, sampleRate = 1000,
+    loop = true, loopStart = 0, loopEnd = 63 }
+end)
+pcmAudio.start({
+  [1] = {
+    chip = {},
+    pcm = {
+      events = { { tick = 0, gate = 48, key = 60, vel = 100,
+        volume = 100, pan = 64, bank = 0, archive = 0, wave = 0,
+        pitch = 60 } },
+      tempoTimeline = { { tick = 0, tempo = 240 } },
+      loopTick = 48,
+    },
+  },
+}, {}, now, true)
+pcmAudio.update()
+local audible = 0
+for _, buffer in ipairs(synth.buffers) do
+  for _, value in pairs(buffer.data) do
+    if math.abs(value) > 0.001 then audible = audible + 1 end
+  end
+end
+check(audible > 0, "GBA PCM voice produced no samples")
+pcmAudio.stop()
 
 package.loaded["src.core.ChipSynth"] = previousSynth
 package.loaded["src.core.ChipAudio"] = previousAudio

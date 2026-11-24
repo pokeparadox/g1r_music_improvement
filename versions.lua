@@ -344,9 +344,10 @@ M.VARIANT_KINDS = {
   { key = "g2_improved", label = "G2E" },
   { key = "g3", label = "G3" },
   { key = "g3_mix", label = "G3 Mix" },
+  { key = "g4_mix", label = "G4 Mix" },
 }
 M.MENU_KINDS = M.VARIANT_KINDS
-M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix" }
+M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix", "g4_mix" }
 
 local VARIANT_LABELS = {}
 for _, item in ipairs(M.VARIANT_KINDS) do VARIANT_LABELS[item.key] = item.label end
@@ -365,6 +366,10 @@ function M.variantKind(value, hostGeneration)
   end
   if type(value) ~= "table" then return "g1" end
   local id = tostring(value.id or "")
+  if value.g4Mix or (value.candidate and value.candidate.g4Mix)
+      or id:match("^Music_G4Mix") then
+    return "g4_mix"
+  end
   if value.mix or (value.candidate and value.candidate.mix)
       or id:match("^Music_Mix") then
     return "g3_mix"
@@ -411,6 +416,9 @@ function M.qualityRank(kind, hostGeneration)
   -- Native G3 is the real arrangement; G3 Mix is the backport approximation.
   if canonical == "g3" then return 0, tonumber(hostGeneration) == 3 and 0 or 1 end
   if canonical == "g3_mix" then return 1, 0 end
+  -- G4 Mix is a new NDS-derived alternative; rank below G3 Mix but above
+  -- generic improved/stock variants.
+  if canonical == "g4_mix" then return 2, 0 end
   local generation = tonumber(tostring(canonical):match("^g(%d)")) or 1
   local tier = tostring(canonical):match("improved") and 2 or 3
   return tier, generation == tonumber(hostGeneration) and 0 or 1

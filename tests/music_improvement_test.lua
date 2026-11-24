@@ -756,9 +756,13 @@ T.eq(optionRows[3] and optionRows[3].musicImprovementId, "music_improvement_juke
   "Music Test is reachable from the visible options group")
 T.eq(optionRows[4] and optionRows[4].musicImprovementId, "music_improvement_regenerate",
   "cache regeneration is reachable from the visible options group")
-T.eq(optionRows[5] and optionRows[5].musicImprovementId, "music_improvement_sources",
+T.eq(optionRows[5] and optionRows[5].musicImprovementId, "music_improvement_nds_import",
+  "NDS import is reachable from the visible options group")
+T.eq(optionRows[5] and optionRows[5].id, "sfxVol",
+  "NDS import row belongs to the AUDIO options group")
+T.eq(optionRows[6] and optionRows[6].musicImprovementId, "music_improvement_sources",
   "source toggles are grouped in the visible options group")
-T.eq(optionRows[5] and optionRows[5].id, "musicVol",
+T.eq(optionRows[6] and optionRows[6].id, "musicVol",
   "source row belongs to the AUDIO options group")
 local mixSongsRow
 for _, row in ipairs(optionRows) do
@@ -771,7 +775,7 @@ T.eq(mixSongsRow, nil, "per-song G3 Mix configuration row is gone")
 T.eq(run.loader.content.screens:get("MusicImprovementMixSongs"), nil,
   "per-song G3 Mix configuration screen is gone")
 local okGen3Sources = pcall(function()
-  optionRows[5].activate({ save = { version = "firered" } })
+  optionRows[6].activate({ save = { version = "firered" } })
   pcall(require("src.ui.game3.stack").pop, "music_improvement_menu")
 end)
 T.eq(okGen3Sources, true, "source row opens through the GBA modal stack")
@@ -789,15 +793,15 @@ T.eq(type(sourceScreen and sourceScreen.new), "function",
   "source screen is registered")
 local sourceMenu = sourceScreen.new(run.data)
 T.eq(sourceMenu.rows, 5, "source menu leaves room for the footer")
-local sourceLabels = { "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G3" }
+local sourceLabels = { "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G4 MIX", "G3" }
 for index, label in ipairs(sourceLabels) do
   T.eq(sourceMenu.items[index] and sourceMenu.items[index].label, label,
     "source toggle " .. index .. " is " .. label)
 end
-T.eq(sourceMenu.items[7].right, "N/A",
+T.eq(sourceMenu.items[8].right, "N/A",
   "native G3 is unavailable outside GBA hosts")
 local gbaSourceMenu = sourceScreen.new({ save = { version = "firered" } })
-T.eq(gbaSourceMenu.items[7].right, "YES",
+T.eq(gbaSourceMenu.items[8].right, "YES",
   "native G3 is enabled on GBA hosts")
 
 if cache and exports and type(cache.delete) == "function" then
@@ -908,6 +912,16 @@ local mainSource = run.loader.fs.read("mods/g1r_music_improvement/main.lua")
 T.eq(type(mainSource) == "string"
   and mainSource:find('hostIsGen3(self) and self.phase == "field"', 1, true) ~= nil,
   true, "Gen3 enhance prompt is gated on the field phase")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("elseif generation == hostGeneration then", 1, true) ~= nil
+  and mainSource:find("g4Mix.has(entry.id, candidateLabel)", 1, true) ~= nil,
+  true, "G4 candidates enumerate host generation (Gold gets G2 variants)")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("local variantIds = {}", 1, true) ~= nil
+  and mainSource:find("for _, id in ipairs(ids) do variantIds[#variantIds + 1] = id end",
+    1, true) ~= nil
+  and mainSource:find("isSongData(data) and data.audio.songs[id]", 1, true) ~= nil,
+  true, "Gold boot buildQueue separates raw G4 ids from native data.audio ids")
 
 -- Gen3 right labels must use the GBA viewport, not the desktop window width.
 local fontKey = "src.ui.game3.frlg_font"

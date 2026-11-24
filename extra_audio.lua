@@ -23,6 +23,8 @@ return function()
 
   local state = {
     engines = {},
+    pcms = {},
+    sampleReader = nil,
     envelopes = {},
     pans = {},
     gains = {},
@@ -46,7 +48,57 @@ return function()
     resyncCount = 0,
     resyncSince = 0,
     givenUp = false,
+    profile = "gb",
+    maxEngines = nil,
   }
+
+  local function engineKeys()
+    local numeric = {}
+    local named = {}
+    local legacy = { left = true, center = true, right = true }
+    local others = {}
+    for key in pairs(state.engines) do
+      if type(key) == "number" then
+        numeric[#numeric + 1] = key
+      elseif not legacy[key] then
+        others[#others + 1] = key
+      end
+    end
+    table.sort(numeric)
+    table.sort(others)
+    for _, key in ipairs(numeric) do named[#named + 1] = key end
+    for _, key in ipairs({ "left", "center", "right" }) do
+      if state.engines[key] then named[#named + 1] = key end
+    end
+    for _, key in ipairs(others) do named[#named + 1] = key end
+    return named
+  end
+
+  local function songSides(song)
+    local numeric = {}
+    local named = {}
+    local others = {}
+    for side, sideSong in pairs(song) do
+      if type(sideSong) == "table" and type(sideSong.chip) == "table" then
+        if type(side) == "number" then
+          numeric[#numeric + 1] = side
+        elseif side ~= "left" and side ~= "center" and side ~= "right" then
+          others[#others + 1] = side
+        end
+      end
+    end
+    table.sort(numeric)
+    table.sort(others)
+    for _, side in ipairs(numeric) do named[#named + 1] = side end
+    for _, side in ipairs({ "left", "center", "right" }) do
+      local sideSong = song[side]
+      if type(sideSong) == "table" and type(sideSong.chip) == "table" then
+        named[#named + 1] = side
+      end
+    end
+    for _, side in ipairs(others) do named[#named + 1] = side end
+    return named
+  end
 
   local function sampleEnvelope(envelope, t)
     if type(envelope) ~= "table" or #envelope == 0 then return 1.0 end
@@ -64,6 +116,189 @@ return function()
     return g
   end
 
+  -- ChipSynth advances 0.4 * M4A tempo seq ticks per second; convert those
+  -- ticks to output samples so PCM voices stay locked to chip events.
+  local MAX_PCM_VOICES = 16
+
+  local function pcmSample(data, frame)
+    local index = frame * 2 + 1
+    if index < 1 or index + 1 > #data then return 0 end
+    local lo, hi = data:byte(index), data:byte(index + 1)
+    local value = lo + hi * 256
+    if value >= 32768 then value = value - 65536 end
+    return value / 32768
+  end
+
+  local function pcmTickToSample(timeline, tick)
+    local done, samples = 0, 0
+    for i = 1, #timeline do
+      local current = timeline[i]
+      local nextTick = timeline[i + 1] and timeline[i + 1].tick or tick
+      local untilTick = math.min(tick, nextTick)
+      if untilTick > done then
+        samples = samples + (untilTick - done) * SAMPLE_RATE * 2.5
+          / math.max(1, current.tempo or 300)
+        done = untilTick
+      end
+      if done >= tick then break end
+    end
+    return math.floor(samples + 0.5)
+  end
+
+  local function pcmSeek(pcm, pos)
+    if not pcm then return end
+    pcm.pos = pos
+    pcm.active = {}
+    pcm.cycle = 0
+    pcm.nextEvent = 1
+    local target = pos
+    if pcm.loopSamples and pcm.loopSamples > 0 and pos >= pcm.loopSamples then
+      pcm.cycle = math.floor(pos / pcm.loopSamples)
+      target = pos - pcm.cycle * pcm.loopSamples
+    end
+    for index, event in ipairs(pcm.events) do
+      if event.at >= target then pcm.nextEvent = index break end
+    end
+  end
+
+  local function pcmPrepare(side, sideSong)
+    local pcm = sideSong.pcm
+    if type(pcm) ~= "table" or type(pcm.events) ~= "table" or #pcm.events == 0
+        or type(state.sampleReader) ~= "function" then return nil end
+    local timeline = type(pcm.tempoTimeline) == "table" and pcm.tempoTimeline
+      or { { tick = 0, tempo = 300 } }
+    if (timeline[1] or {}).tick ~= 0 then
+      local copy = { { tick = 0, tempo = timeline[1].tempo or 300 } }
+      for _, entry in ipairs(timeline) do copy[#copy + 1] = entry end
+      timeline = copy
+    end
+    local events, samples = {}, {}
+    for _, event in ipairs(pcm.events) do
+      local key = tostring(event.bank) .. ":" .. tostring(event.archive) .. ":"
+        .. tostring(event.wave)
+      local sample = samples[key]
+      if sample == nil then
+        local ok, resolved = pcall(state.sampleReader, event.bank, {
+          waveArchiveID = event.archive, waveID_dutyCycle = event.wave,
+        })
+        if ok and type(resolved) == "table" and type(resolved.data) == "string"
+            and #resolved.data >= 4 then
+          sample = resolved
+        else
+          sample = false
+        end
+        samples[key] = sample
+      end
+      if sample then
+        local at = pcmTickToSample(timeline, event.tick)
+        local gateEnd = pcmTickToSample(timeline, event.tick + (event.gate or 1))
+        events[#events + 1] = {
+          at = at, gateSamples = math.max(1, gateEnd - at),
+          key = tonumber(event.key) or 60, pitch = tonumber(event.pitch) or 60,
+          vel = math.max(1, math.min(127, tonumber(event.vel) or 100)),
+          volume = math.max(1, math.min(127, tonumber(event.volume) or 100)),
+          pan = tonumber(event.pan) or 0x40,
+          sample = sample,
+        }
+      end
+    end
+    if #events == 0 then return nil end
+    table.sort(events, function(a, b) return a.at < b.at end)
+    local built = {
+      events = events, active = {}, pos = 0, nextEvent = 1, cycle = 0,
+      loopSamples = pcm.loopTick and pcm.loopTick > 0
+        and pcmTickToSample(timeline, pcm.loopTick) or 0,
+      looping = true,
+    }
+    pcmSeek(built, 0)
+    return built
+  end
+
+  local function pcmRender(pcm, leftMix, rightMix, start, count, baseGain)
+    if not pcm or #pcm.active == 0 and pcm.nextEvent > #pcm.events
+        and pcm.loopSamples == 0 then return end
+    local last = start + count
+    while true do
+      local event = pcm.events[pcm.nextEvent]
+      if not event and pcm.loopSamples > 0 then
+        pcm.cycle = pcm.cycle + 1
+        pcm.nextEvent = 1
+        event = pcm.events[1]
+      end
+      if not event then break end
+      local at = event.at + pcm.cycle * pcm.loopSamples
+      if at > last then break end
+      if at >= start and #pcm.active < MAX_PCM_VOICES then
+        local data = event.sample.data
+        local frames = math.floor(#data / 2)
+        local rate = tonumber(event.sample.sampleRate) or SAMPLE_RATE
+        if rate < 1000 then rate = SAMPLE_RATE end
+        local loopStart = math.max(0, math.floor(tonumber(event.sample.loopStart) or 0))
+        local loopEnd = math.floor(tonumber(event.sample.loopEnd) or frames - 1)
+        if loopEnd <= loopStart then loopEnd = frames - 1 end
+        local ratio = rate / SAMPLE_RATE
+          * 2 ^ ((event.key - event.pitch) / 12)
+        local pan = math.max(-1, math.min(1, (event.pan - 0x40) / 0x80))
+        pcm.active[#pcm.active + 1] = {
+          data = data, phase = loopStart,
+          endFrame = loopEnd > loopStart and loopEnd or frames - 1,
+          loop = event.sample.loop and loopEnd > loopStart or false,
+          step = ratio, start = at,
+          stop = at + event.gateSamples + math.floor(SAMPLE_RATE * 0.08),
+          gateEnd = at + event.gateSamples,
+          gain = baseGain * math.sqrt((event.vel / 127) * (event.volume / 127)),
+          leftGain = 0.5 + 0.25 * (1 - pan),
+          rightGain = 0.5 + 0.25 * (1 + pan),
+        }
+      end
+      pcm.nextEvent = pcm.nextEvent + 1
+    end
+    for i = 0, count - 1 do
+      local sampleIndex = start + i
+      local mixedL, mixedR = 0, 0
+      for v = #pcm.active, 1, -1 do
+        local voice = pcm.active[v]
+        if sampleIndex >= voice.stop or sampleIndex < pcm.pos then
+          table.remove(pcm.active, v)
+        elseif sampleIndex >= voice.start then
+          local elapsed = (sampleIndex - voice.start) / SAMPLE_RATE
+          local attack, decay, sustain = 0.006, 0.04, 0.65
+          local env
+          if elapsed < attack then
+            env = elapsed / attack
+          elseif elapsed < attack + decay then
+            env = 1 - (1 - sustain) * (elapsed - attack) / decay
+          elseif sampleIndex < voice.gateEnd then
+            env = sustain
+          else
+            env = sustain * math.max(0, 1
+              - (sampleIndex - voice.gateEnd) / (SAMPLE_RATE * 0.08))
+          end
+          local frame = math.floor(voice.phase)
+          local value = pcmSample(voice.data, frame)
+          local frac = voice.phase - frame
+          if frac > 0 then
+            value = value * (1 - frac) + pcmSample(voice.data, frame + 1) * frac
+          end
+          voice.phase = voice.phase + voice.step
+          if voice.phase >= voice.endFrame then
+            if voice.loop then
+              voice.phase = voice.phase - voice.endFrame
+            else
+              voice.phase = voice.endFrame - 1
+            end
+          end
+          local amplified = value * env * voice.gain
+          mixedL = mixedL + amplified * voice.leftGain
+          mixedR = mixedR + amplified * voice.rightGain
+        end
+      end
+      leftMix[i] = leftMix[i] + mixedL
+      rightMix[i] = rightMix[i] + mixedR
+    end
+    pcm.pos = last
+  end
+
   local function isPlaying(src)
     if not src then return false end
     local ok, playing = pcall(src.isPlaying, src)
@@ -74,6 +309,7 @@ return function()
     if state.source then pcall(state.source.stop, state.source) end
     state.source = nil
     state.engines = {}
+    state.pcms = {}
     state.envelopes = {}
     state.pans = {}
     state.gains = {}
@@ -139,22 +375,25 @@ return function()
     for i = 0, chunk - 1 do leftMix[i] = 0; rightMix[i] = 0 end
 
     local chunkStart = state.extraRendered
-    for side, engine in pairs(state.engines) do
+    for index, side in ipairs(engineKeys()) do
+      if state.maxEngines and index > state.maxEngines then break end
+      local engine = state.engines[side]
       local env = state.envelopes and state.envelopes[side]
       local dynGain = sampleEnvelope(env, chunkStart / SAMPLE_RATE)
       if state.sideEnabled[side] == false then dynGain = 0 end
       local pan = state.pans[side] or 0
       local leftGain = 0.5 + 0.25 * (1 - pan)
       local rightGain = 0.5 + 0.25 * (1 + pan)
-      local okSd, sd = pcall(ChipSynth.soundData, engine, chunk, 1)
+      local songGain = state.gains[side] or 1
+      local gain = state.extraGain * state.musicVolume * dynGain * songGain
+      local okSd, sd = engine and pcall(ChipSynth.soundData, engine, chunk, 1)
+        or false, nil
       if okSd and sd and dynGain > 0 then
         local ptr = nil
         if ChipSynth._int16Pointer then
           local okPtr, p = pcall(ChipSynth._int16Pointer, sd)
           if okPtr then ptr = p end
         end
-        local songGain = state.gains[side] or 1
-        local gain = state.extraGain * state.musicVolume * dynGain * songGain
         for i = 0, chunk - 1 do
           local sample = 0
           if ptr then
@@ -166,6 +405,10 @@ return function()
           leftMix[i] = leftMix[i] + sample * gain * leftGain
           rightMix[i] = rightMix[i] + sample * gain * rightGain
         end
+      end
+      local pcm = state.pcms[side]
+      if pcm and dynGain > 0 then
+        pcmRender(pcm, leftMix, rightMix, chunkStart, chunk, gain)
       end
     end
 
@@ -244,6 +487,7 @@ return function()
         remaining = remaining - step
       end
     end
+    for _, pcm in pairs(state.pcms) do pcmSeek(pcm, state.extraRendered + samples) end
   end
 
   local function fillTo(target)
@@ -289,7 +533,12 @@ return function()
     if type(song) ~= "table" then return end
     state.data = data
     state.envelopes = {}
-    for side, sideSong in pairs(song) do
+    local sides = songSides(song)
+    if state.maxEngines and #sides > state.maxEngines then
+      while #sides > state.maxEngines do sides[#sides] = nil end
+    end
+    for _, side in ipairs(sides) do
+      local sideSong = song[side]
       if type(sideSong) == "table" and type(sideSong.chip) == "table" then
         local ok, engine = pcall(ChipSynth.newEngine, data, sideSong, { allowLoops = true })
         if ok and type(engine) == "table" then
@@ -304,6 +553,8 @@ return function()
           if type(sideSong.intensityEnvelope) == "table" then
             state.envelopes[side] = sideSong.intensityEnvelope
           end
+          local pcm = pcmPrepare(side, sideSong)
+          if pcm then state.pcms[side] = pcm end
         end
       end
     end
@@ -411,6 +662,15 @@ return function()
     if n then state.extraGain = math.max(0, math.min(1, n / 7)) end
   end
 
+  local function setProfile(profile)
+    state.profile = profile == "gba" and "gba" or "gb"
+    state.maxEngines = state.profile == "gba" and 16 or nil
+  end
+
+  local function setSampleReader(fn)
+    state.sampleReader = type(fn) == "function" and fn or nil
+  end
+
   local function setMusicVolume(v)
     local n = tonumber(v)
     if n then state.musicVolume = math.max(0, n) end
@@ -432,7 +692,10 @@ return function()
     update = update,
     isActive = isActive,
     setExtraGain = setExtraGain,
+    setExtraMix = setExtraMix,
     setSideEnabled = setSideEnabled,
+    setProfile = setProfile,
+    setSampleReader = setSampleReader,
     setMusicVolume = setMusicVolume,
     setBaseVolume = setBaseVolume,
   }

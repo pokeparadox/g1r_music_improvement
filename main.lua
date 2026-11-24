@@ -61,7 +61,25 @@ return function(mod)
   if g3Mix and g3Mix.setSongIds and g3SongIds then
     g3Mix.setSongIds(g3SongIds)
   end
+  local ndsImport = loadModFile("nds_import.lua")
+  local g4SongMap = loadModFile("g4_song_map.lua")
+  local g4Mix = loadModFile("g4_mix.lua")
+  local sourceFor, sourceHasSong
+  if ndsImport and ndsImport.install then
+    pcall(ndsImport.install, { imports = mod.imports, cache = mod.cache })
+  end
+  if g4Mix and g4Mix.install then
+    pcall(g4Mix.install, {
+      g3Mix = g3Mix, nds = ndsImport, songMap = g4SongMap, cache = mod.cache,
+      versions = versions,
+      available = function(version, label)
+        return sourceFor and sourceHasSong and
+          sourceHasSong(sourceFor(version), label) or false
+      end,
+    })
+  end
   local mixCandidatesFor
+  local g4CandidatesFor
   local gen3Ui
   local openGen3Sources
   local improve = function(src, settings) return improveModule.improve(src, settings) end
@@ -76,6 +94,17 @@ return function(mod)
   local serialize = loadModFile("serialize.lua")
   local extraAudioFactory = loadModFile("extra_audio.lua")
   local extraAudio = extraAudioFactory and extraAudioFactory()
+  local gbaExtraAudio = extraAudioFactory and extraAudioFactory()
+  if gbaExtraAudio and gbaExtraAudio.setProfile then
+    pcall(gbaExtraAudio.setProfile, "gba")
+  end
+  if gbaExtraAudio and gbaExtraAudio.setSampleReader and ndsImport
+      and ndsImport.readSample then
+    pcall(gbaExtraAudio.setSampleReader, function(bank, def)
+      local ok, sample = pcall(ndsImport.readSample, bank, def)
+      if ok then return sample end
+    end)
+  end
 
   local function extraVolumeValue(v)
     if v == "low" then return 0.2 end
@@ -108,6 +137,7 @@ return function(mod)
         g2_improved = optionBool("alt_g2_guided", true),
         g3 = optionBool("alt_g3_native", true),
         g3_mix = optionBool("alt_g3_mix", true),
+        g4_mix = optionBool("alt_g4_mix", true),
       },
     }
   end
@@ -653,6 +683,8 @@ return function(mod)
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g3_mix", type = "toggle", label = "G3 Mix", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
+    { key = "alt_g4_mix", type = "toggle", label = "G4 Mix", default = true,
+      visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g3_native", type = "toggle", label = "G3", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
@@ -812,7 +844,7 @@ return function(mod)
   -- A dataset view is a detached, data-only copy.  Build the same synthetic
   -- audio table ChipSynth expects from it; translated chip defs need no source
   -- bytes at playback time, but the initial decode does.
-  local function sourceFor(version)
+  sourceFor = function(version)
     if sourceCache[version] ~= nil then return sourceCache[version] or nil end
     sourceCache[version] = false
     if not mod.datasets or type(mod.datasets.open) ~= "function" then return nil end
@@ -844,7 +876,7 @@ return function(mod)
     return source
   end
 
-  local function sourceHasSong(source, label)
+  sourceHasSong = function(source, label)
     if not source then return false end
     local music = source.view.content.music
     if type(music.has) == "function" then
@@ -856,8 +888,13 @@ return function(mod)
   end
 
   local function variantIdFor(nativeId, version, enabled, candidate)
-    local suffix = tostring(nativeId):gsub("^Music_", ""):gsub("^MUS_", "")
-    local base = candidate and candidate.mix and "Music_Mix"
+    local rawName = candidate and candidate.g4Mix and type(candidate.label) == "string"
+      and candidate.label:match("^G4:(.+)$") or nil
+    local source = rawName or nativeId
+    local suffix = tostring(source):gsub("^Music_", ""):gsub("^MUS_", "")
+      :gsub("[^%w_]", "_")
+    local base = candidate and candidate.g4Mix and "Music_G4Mix"
+      or candidate and candidate.mix and "Music_Mix"
       or enabled and "Music_Improved" or "Music_Stock"
     return base .. suffix .. "_" .. tostring(version)
   end
@@ -868,7 +905,7 @@ return function(mod)
   end
 
   local function variantKeyFor(nativeId, candidate, enabled)
-    local kind = candidate.mix and "M" or (enabled and "I" or "S")
+    local kind = candidate.g4Mix and "G" or (candidate.mix and "M" or (enabled and "I" or "S"))
     return tostring(nativeId or "") .. "|" .. tostring(candidate.version)
       .. ":" .. tostring(candidate.label) .. ":" .. kind
   end
@@ -888,6 +925,7 @@ return function(mod)
       generation = candidate.generation,
       improved = enabled,
       mix = candidate.mix == true,
+      g4Mix = candidate.g4Mix == true,
     }
     variantByKey[key] = record
     recordById[improvedId] = record
@@ -909,9 +947,18 @@ return function(mod)
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
     end
+    local list = {}
+    local rawName = tostring(nativeId):match("^_(.+)$")
+    if rawName and g4Mix and g4Mix.available and g4Mix.available() then
+      list[#list + 1] = {
+        version = activeCacheGame, generation = hostGeneration,
+        label = "G4:" .. rawName, g4Mix = true,
+      }
+      candidateCache[cacheKey] = list
+      return list
+    end
     local all = versions.candidates(nativeId, hostGeneration, activeCacheGame,
       function(version, label) return sourceHasSong(sourceFor(version), label) end, true)
-    local list = {}
     for _, candidate in ipairs(all) do
       -- G3 native playback only exists on a Gen3 host.  G3 Mix is added
       -- separately and stays available everywhere.
@@ -921,15 +968,18 @@ return function(mod)
         list[#list + 1] = candidate
       end
     end
-    if mixCandidatesFor then
-      local canonical = versions.canonicalGen3Label(nativeId)
-      local group = versions.byLabel[canonical]
-      local label = group and group.gen3
-        or (tostring(canonical):match("^MUS_") and canonical or nil)
-      if label and versions.mixAllowed(group, hostGeneration) then
-        for _, candidate in ipairs(mixCandidatesFor(label)) do
-          list[#list + 1] = candidate
-        end
+    local canonical = versions.canonicalGen3Label(nativeId)
+    local group = versions.byLabel[canonical]
+    local label = group and group.gen3
+      or (tostring(canonical):match("^MUS_") and canonical or nil)
+    if g4CandidatesFor and label and versions.mixAllowed(group, hostGeneration) then
+      for _, candidate in ipairs(g4CandidatesFor(nativeId, hostGeneration, group)) do
+        list[#list + 1] = candidate
+      end
+    end
+    if mixCandidatesFor and label and versions.mixAllowed(group, hostGeneration) then
+      for _, candidate in ipairs(mixCandidatesFor(label)) do
+        list[#list + 1] = candidate
       end
     end
     candidateCache[cacheKey] = list
@@ -1225,6 +1275,38 @@ return function(mod)
     return out
   end
 
+  g4CandidatesFor = function(nativeId, hostGeneration, group)
+    local out, seen = {}, {}
+    if not g4Mix or not g4Mix.available or not g4Mix.available() then return out end
+    local key = group and group.gen3 or nativeId
+    local function add(version, generation, label)
+      local dedupe = tostring(version) .. ":" .. tostring(label)
+      if seen[dedupe] then return end
+      seen[dedupe] = true
+      out[#out + 1] = {
+        version = version, generation = generation, label = label, g4Mix = true,
+      }
+    end
+    for _, entry in ipairs(versions.VERSIONS) do
+      local generation = entry.generation
+        or (versions.BY_ID[entry.id] and versions.BY_ID[entry.id].generation)
+      if generation == 3 then
+        for _, candidateLabel in ipairs(versions.mixLabelsFor(key, entry.id)) do
+          if g3Mix.has(entry.id, candidateLabel) and g4Mix.has(entry.id, candidateLabel) then
+            add(entry.id, 3, candidateLabel)
+            break
+          end
+        end
+      elseif generation == hostGeneration then
+        local candidateLabel = group and group["gen" .. generation]
+        if candidateLabel and g4Mix.has(entry.id, candidateLabel) then
+          add(entry.id, generation, candidateLabel)
+        end
+      end
+    end
+    return out
+  end
+
   local mixSongListCache
   local function mixSongList()
     if mixSongListCache then return mixSongListCache end
@@ -1279,7 +1361,10 @@ return function(mod)
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGeneration = GameVersion.generation(activeCacheGame) or hostGeneration
     end
-    local variantIds = ids
+    -- Keep variant ids separate.  Raw G4 entries are appended below; `ids`
+    -- must stay native songs for the data.audio.songs lookup in this loop.
+    local variantIds = {}
+    for _, id in ipairs(ids) do variantIds[#variantIds + 1] = id end
     if hostGeneration == 3 then
       -- Gen3 data has no audio.songs; enumerate the host's song table instead.
       variantIds = {}
@@ -1296,12 +1381,28 @@ return function(mod)
       end
       table.sort(variantIds)
     end
+    if g4Mix and g4Mix.available and g4Mix.available() and g4Mix.songList then
+      local rawSeen = {}
+      for _, id in ipairs(variantIds) do rawSeen[id] = true end
+      for _, label in ipairs(g4Mix.songList()) do
+        local rawName = label:match("^G4:(.+)$")
+        if rawName then
+          local nativeId = "_" .. rawName:gsub("[^%w]", "_")
+          if not rawSeen[nativeId] then
+            rawSeen[nativeId] = true
+            variantIds[#variantIds + 1] = nativeId
+          end
+        end
+      end
+      table.sort(variantIds)
+    end
     local hash = settingsHash(settings)
     for _, id in ipairs(ids) do
       if not tostring(id):match("^Music_Improved")
           and not tostring(id):match("^Music_Stock")
-          and not tostring(id):match("^Music_Mix") then
-        local def = data.audio.songs[id]
+          and not tostring(id):match("^Music_Mix")
+          and not tostring(id):match("^Music_G4Mix") then
+        local def = isSongData(data) and data.audio.songs[id] or nil
         local shouldProcess = true
         if shouldProcess then
           originalDefs[id] = def
@@ -1351,10 +1452,11 @@ return function(mod)
       for _, id in ipairs(variantIds) do
         if not tostring(id):match("^Music_Improved")
             and not tostring(id):match("^Music_Stock")
-            and not tostring(id):match("^Music_Mix") then
+            and not tostring(id):match("^Music_Mix")
+              and not tostring(id):match("^Music_G4Mix") then
           for _, candidate in ipairs(candidatesFor(id, settings)) do
             for _, enabled in ipairs(enabledList) do
-              if not candidate.mix or enabled then
+              if (not candidate.mix and not candidate.g4Mix) or enabled then
                 local s2 = { enabled = enabled }
                 local record = loadVariant(id, candidate, s2)
                 if record then
@@ -1374,6 +1476,7 @@ return function(mod)
                       generation = candidate.generation,
                       enabled = enabled,
                       mix = candidate.mix == true,
+                      g4Mix = candidate.g4Mix == true,
                     }
                   end
                 end
@@ -1495,6 +1598,15 @@ return function(mod)
         return nil
       end
       translated = registerSpec(converted.def, ss, entry.improvedId, converted.extra)
+    elseif entry.g4Mix then
+      local converted = g4Mix and g4Mix.convert and
+        g4Mix.convert(entry.version, entry.label)
+      if not converted then
+        mod.log:warn("music_improvement: no G4 mix data for %s (%s)",
+          tostring(entry.label), tostring(entry.version))
+        return nil
+      end
+      translated = registerSpec(converted.def, ss, entry.improvedId, converted.extra)
     else
       local source = sourceFor(entry.version)
       local def = source and source.view.content.music:get(entry.label)
@@ -1532,6 +1644,7 @@ return function(mod)
       generation = candidate.generation,
       enabled = enabled,
       mix = candidate.mix == true,
+      g4Mix = candidate.g4Mix == true,
     }, s)
   end
 
@@ -1749,10 +1862,14 @@ return function(mod)
     { "alt_g2_stock", "G2" },
     { "alt_g2_guided", "G2E" },
     { "alt_g3_mix", "G3 MIX" },
+    { "alt_g4_mix", "G4 MIX" },
     { "alt_g3_native", "G3" },
   }
   local function sourceRight(game, key)
     if key == "alt_g3_native" and not hostIsGen3(game) then return "N/A" end
+    if key == "alt_g4_mix" and (not g4Mix or not g4Mix.available or not g4Mix.available()) then
+      return "N/A"
+    end
     local value = optionValue(key)
     local off = value == false or tostring(value) == "0"
     -- FRLG font has no bracket glyphs; YES/NO render on every host.
@@ -1769,6 +1886,9 @@ return function(mod)
   end
   local function toggleSource(game, key)
     if key == "alt_g3_native" and not hostIsGen3(game) then return false end
+    if key == "alt_g4_mix" and (not g4Mix or not g4Mix.available or not g4Mix.available()) then
+      return false
+    end
     local now = optionValue(key)
     local off = now == false or tostring(now) == "0"
     setModOption(game, key, off and "1" or "0")
@@ -1850,6 +1970,26 @@ return function(mod)
           return "PRESS A"
         end,
         activate = function(g) regenerateCache((type(g) == "table" and g.game) or g) end,
+      },
+
+      {
+        -- Gold groups options by id; use an AUDIO member so NDS IMPORT shows
+        -- on the same page as other music controls.
+        id = "sfxVol",
+        musicImprovementId = "music_improvement_nds_import",
+        label = "NDS IMPORT",
+        value = function()
+          local st = ndsImport and ndsImport.status and ndsImport.status() or {}
+          if not st.available then return "MISSING" end
+          return string.format("READY %d", st.songCount or 0)
+        end,
+        activate = function(g)
+          local game = (type(g) == "table" and g.game) or g or readyGame
+          local st = ndsImport and ndsImport.status and ndsImport.status()
+          if not st or not st.available then return end
+          if g4Mix and g4Mix.refresh then pcall(g4Mix.refresh) end
+          regenerateCache(game)
+        end,
       },
 
       {
@@ -2100,21 +2240,23 @@ return function(mod)
         end)
         local seenContent = {}
         for _, record in ipairs(records) do
-          if not (hostGen ~= 3 and record.generation == 3 and not record.mix) then
-          local contentKey = record.cachePath or record.id
-          if contentKey and seenContent[contentKey] then
-            -- Skip an identical translation already represented by another version.
-          else
-            if contentKey then seenContent[contentKey] = true end
-            variants[#variants + 1] = {
-              candidate = record.candidate,
-              improved = record.improved,
-              mix = record.mix,
-              generation = record.generation,
-              version = record.version,
-              id = record.id,
-            }
-          end
+          if not (hostGen ~= 3 and record.generation == 3
+              and not record.mix and not record.g4Mix) then
+            local contentKey = record.cachePath or record.id
+            if contentKey and seenContent[contentKey] then
+              -- Skip an identical translation already represented by another version.
+            else
+              if contentKey then seenContent[contentKey] = true end
+              variants[#variants + 1] = {
+                candidate = record.candidate,
+                improved = record.improved,
+                mix = record.mix,
+                g4Mix = record.g4Mix,
+                generation = record.generation,
+                version = record.version,
+                id = record.id,
+              }
+            end
           end
         end
         add({
@@ -2171,6 +2313,79 @@ return function(mod)
         end
       end
     end
+    if g4Mix and g4Mix.available and g4Mix.available() and g4Mix.songList then
+      local g4Seen = {}
+      local songIds = hostGen == 3 and gen3SongIds(game) or nil
+      local carrierId = songIds and next(songIds) and songIds[next(songIds)] or nil
+      for _, label in ipairs(g4Mix.songList()) do
+        local rawName = label:match("^G4:(.+)$")
+        if rawName then
+          local nativeId = "_" .. rawName:gsub("[^%w]", "_")
+          if not g4Seen[nativeId] then
+            local candidate = {
+              version = activeCacheGame, generation = hostGen,
+              label = label, g4Mix = true,
+            }
+            local variants = {}
+            for _, record in ipairs(variantMap[nativeId] or {}) do
+              if record.g4Mix and record.id then
+                variants[#variants + 1] = {
+                  candidate = record.candidate, g4Mix = true, improved = true,
+                  generation = record.generation or hostGen,
+                  version = record.version, id = record.id,
+                }
+              end
+            end
+            if #variants == 0 then
+              variants[1] = {
+                candidate = candidate, g4Mix = true, improved = true,
+                generation = hostGen, version = activeCacheGame,
+              }
+            end
+            g4Seen[nativeId] = true
+            add({
+              name = rawName .. " (G4)",
+              nativeId = nativeId, playId = carrierId,
+              variants = variants,
+            })
+          end
+        else
+        local canonical = versions.canonicalGen3Label(label)
+        local group = versions.byLabel[canonical]
+        local nativeId = (group and group["gen" .. hostGen]) or canonical
+        if versions.mixAllowed(group, hostGen) and not g4Seen[nativeId] then
+          local variants = {}
+          for _, record in ipairs(variantMap[nativeId] or {}) do
+            if record.g4Mix and record.id then
+              variants[#variants + 1] = {
+                candidate = record.candidate,
+                g4Mix = true, improved = true,
+                generation = record.generation or 3,
+                version = record.version, id = record.id,
+              }
+            end
+          end
+          if #variants == 0 then
+            for _, candidate in ipairs(g4CandidatesFor(nativeId, hostGen, group)) do
+              variants[#variants + 1] = {
+                candidate = candidate, g4Mix = true, improved = true,
+                generation = candidate.generation or 3,
+                version = candidate.version,
+              }
+            end
+          end
+          if #variants > 0 then
+            g4Seen[nativeId] = true
+            add({
+              name = versions.nameFor(label) .. " (G4)",
+              nativeId = nativeId,
+              variants = variants,
+            })
+          end
+        end
+        end
+      end
+    end
     table.sort(entries, function(a, b)
       return a.name:lower() < b.name:lower()
     end)
@@ -2199,13 +2414,16 @@ return function(mod)
     local entry, variant = item.entry, item.variant
     if hostIsGen3(game) then
       local A = audio3()
-      local numeric = gen3SongId(entry.nativeId, game)
+      local numeric = gen3SongId(entry.playId or entry.nativeId, game)
       if not (A and A.playSong and numeric) then return end
       if variant.native then
         pcall(A.playSong, numeric, { forceNative = true })
       else
         pcall(A.playSong, numeric, {
-          forceVariant = { candidate = variant.candidate, improved = variant.improved },
+          forceVariant = {
+            candidate = variant.candidate, improved = variant.improved,
+            nativeId = entry.nativeId,
+          },
         })
       end
       return
@@ -2423,6 +2641,7 @@ return function(mod)
     currentReason = nil
     pendingExtra = nil
     if extraAudio then pcall(extraAudio.stop) end
+    if gbaExtraAudio then pcall(gbaExtraAudio.stop) end
     pcall(applyChannelMix)
   end)
 
@@ -2431,6 +2650,10 @@ return function(mod)
     if extraAudio then
       pcall(extraAudio.setMusicVolume, tonumber(out) or vol)
       pcall(extraAudio.setBaseVolume, tonumber(out) or vol)
+    end
+    if gbaExtraAudio then
+      pcall(gbaExtraAudio.setMusicVolume, tonumber(out) or vol)
+      pcall(gbaExtraAudio.setBaseVolume, tonumber(out) or vol)
     end
     return out
   end)
@@ -2500,9 +2723,10 @@ return function(mod)
     if generation == 3 then
       local host = loadModFile("gen3.lua")
       if host and type(host.install) == "function" then
-        local extra = extraAudio or {
+        local extra = gbaExtraAudio or extraAudio or {
           start = function() end, stop = function() end,
           setMusicVolume = function() end, setBaseVolume = function() end,
+          update = function() end, setExtraMix = function() end,
         }
         host.install({
           versions = versions,
@@ -2544,6 +2768,9 @@ return function(mod)
       frameGuard(dt)
       -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
       -- Start harmony after it, in the same frame, instead of one frame late.
+      if gbaExtraAudio and hostIsGen3(self) then
+        pcall(gbaExtraAudio.setExtraMix, mod.options:get("extra_mix"))
+      end
       if extraAudio then
         if suppressExtra then
           pendingExtra = nil
