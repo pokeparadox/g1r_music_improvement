@@ -928,6 +928,14 @@ T.eq(type(mainSource) == "string"
     1, true) ~= nil
   and mainSource:find("isSongData(data) and data.audio.songs[id]", 1, true) ~= nil,
   true, "Gold boot buildQueue separates raw G4 ids from native data.audio ids")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("for _, audio in ipairs({ extraAudio, gbaExtraAudio }) do",
+    1, true) ~= nil
+  and mainSource:find("pcall(audio.setSampleReader, readNdsSample)", 1, true) ~= nil,
+  true, "GB and GBA extra engines both receive the NDS sample reader")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("if spec.pcm then song.pcm = spec.pcm end", 1, true) ~= nil,
+  true, "G4 extra songs retain PCM refs for extra_audio")
 
 -- Gen3 right labels must use the GBA viewport, not the desktop window width.
 local fontKey = "src.ui.game3.frlg_font"

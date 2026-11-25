@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v11"
+local CONVERTER_VERSION = "g4_v13"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -752,10 +752,11 @@ local function decodeTrack(seq, start, voices, songBank)
       if vel >= 20 then
         local voice = voices:voice(bankID, program, cmd)
         voices:markLead(voice, cmd + transpose, gate)
+        local tone = voices.voices[1][voice]
         add("note", {
           key = cmd + transpose, rawKey = cmd, vel = vel,
           gate = gate, longGate = gate >= 6,
-          voice = voice,
+          voice = voice, hasPcm = tone ~= nil and tone.pcm ~= nil,
           volume = clamp(math.floor(volume * master / 127), 1, 255),
           pan = pan, bend = bend, bendRange = bendRange,
         })
@@ -874,7 +875,7 @@ local function decodeTrack(seq, start, voices, songBank)
   }
 end
 
-local function synthTrack(decoded, perNoteState)
+local function synthTrack(decoded, perNoteState, mutePcm)
   local out, current, lastVoice = {}, 0, nil
   local loopTarget
   local function emit(event)
@@ -913,26 +914,30 @@ local function synthTrack(decoded, perNoteState)
       out[#out + 1] = 0xC1
       out[#out + 1] = clamp(event.value or 2, 0, 255)
     elseif kind == "note" then
-      if perNoteState then
-        -- Premixed tracks carry notes from several SSEQ tracks; state must be
-        -- restated per note or one track's instrument/pan leaks into another.
-        out[#out + 1] = 0xBD
-        out[#out + 1] = clamp(event.voice or 0, 0, 255)
-        out[#out + 1] = 0xBF
-        out[#out + 1] = clamp(event.pan or 0x40, 0, 127)
-        out[#out + 1] = 0xBE
-        out[#out + 1] = clamp(math.floor((event.volume or 127) * 255 / 127 + 0.5), 0, 255)
-        lastVoice = event.voice
-      elseif lastVoice ~= event.voice then
-        lastVoice = event.voice
-        out[#out + 1] = 0xBD
-        out[#out + 1] = clamp(lastVoice or 0, 0, 255)
+      -- On GB hosts PCM voices are rendered by extra_audio; muting the
+      -- matching GB note avoids doubling while waits keep exact timing.
+      if not (mutePcm and event.hasPcm) then
+        if perNoteState then
+          -- Premixed tracks carry notes from several SSEQ tracks; state must be
+          -- restated per note or one track's instrument/pan leaks into another.
+          out[#out + 1] = 0xBD
+          out[#out + 1] = clamp(event.voice or 0, 0, 255)
+          out[#out + 1] = 0xBF
+          out[#out + 1] = clamp(event.pan or 0x40, 0, 127)
+          out[#out + 1] = 0xBE
+          out[#out + 1] = clamp(math.floor((event.volume or 127) * 255 / 127 + 0.5), 0, 255)
+          lastVoice = event.voice
+        elseif lastVoice ~= event.voice then
+          lastVoice = event.voice
+          out[#out + 1] = 0xBD
+          out[#out + 1] = clamp(lastVoice or 0, 0, 255)
+        end
+        local command, extra = gateCommand(event.gate)
+        out[#out + 1] = command
+        out[#out + 1] = clamp(event.key or 60, 0, 127)
+        out[#out + 1] = clamp(event.vel or 100, 20, 127)
+        if extra > 0 then out[#out + 1] = extra end
       end
-      local command, extra = gateCommand(event.gate)
-      out[#out + 1] = command
-      out[#out + 1] = clamp(event.key or 60, 0, 127)
-      out[#out + 1] = clamp(event.vel or 100, 20, 127)
-      if extra > 0 then out[#out + 1] = extra end
     end
   end
   for _, event in ipairs(decoded.events) do emit(event) end
@@ -1124,11 +1129,12 @@ local function buildSong(seq, bankID, generation)
   }, voices.voices, decodedTracks
 end
 
--- Gen3 keeps real SWAV sample references alongside the GB spec.  extra_audio
--- resolves them through nds_import and mixes them as PCM voices; GB hosts use
--- the sampled 32-step wave table baked into the spec instead.
+-- Keep real SWAV sample references alongside the chip spec for every host.
+-- Gen3 renders them directly on the GBA source; gen1/gen2 render them on the
+-- GB extra_audio source.  The baked 32-step waves stay as fallback for notes
+-- without a resolved sample.
 local function pcmForTracks(tracks, voicegroups, generation)
-  if generation < 3 then return nil end
+  if generation < 1 or generation > 3 then return nil end
   local events, timeline = {}, { { tick = 0, tempo = 240 } }
   local loopTick
   for _, track in ipairs(tracks or {}) do
@@ -1198,8 +1204,16 @@ function M.convert(version, label)
   end
   -- One spec per decoded track. The old four-tracks-per-spec grouping made
   -- short voices wait at the longest track's loop point, sounding like a pause.
-  local specs, specTracks = {}, {}
+  local specs, specTracks, specPcms = {}, {}, {}
+  local premixed = sourceTracks > songDef.tracks
   for trackIndex, trackBytes in ipairs(songDef.trackData) do
+    local pcm = pcmForTracks({ groupedTracks[trackIndex] }, voicegroups, generation)
+    specPcms[trackIndex] = pcm
+    -- Base spec stays chip-only (base source has no PCM path). Side specs on
+    -- GB hosts mute notes backed by PCM so extra_audio does not double voices.
+    if pcm and generation < 3 and trackIndex > 1 then
+      trackBytes = synthTrack(groupedTracks[trackIndex], premixed, true)
+    end
     local perTrackSong = {
       name = songDef.name, tracks = 1, trackData = { trackBytes },
       voicegroup = 1,
@@ -1226,7 +1240,7 @@ function M.convert(version, label)
   end
   local extra = {}
   for i, spec in ipairs(specs) do
-    spec.pcm = pcmForTracks({ specTracks[i] }, voicegroups, generation)
+    spec.pcm = specPcms[i]
     if i > 1 then
       spec.generation = generation
       spec.g4Mix = true

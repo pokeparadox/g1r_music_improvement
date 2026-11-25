@@ -16,7 +16,11 @@ local events = string.char(
   0x3C, 100, 48,
   0xFF
 )
-local blob = string.char(0xFE, 0x01, 0x00, 0x93, 0x00) .. u24le(8) .. events
+local events2 = string.char(0x81, 0x00, 0x3C, 100, 48, 0xFF)
+local firstOffset = 13
+local secondOffset = firstOffset + #events
+local blob = string.char(0xFE, 0x03, 0x00, 0x93, 0x00) .. u24le(firstOffset)
+  .. string.char(0x93, 0x01) .. u24le(secondOffset) .. events .. events2
 
 local sampleBytes = {}
 for _ = 1, 64 do
@@ -24,17 +28,14 @@ for _ = 1, 64 do
 end
 local sampleData = table.concat(sampleBytes)
 
-local captured
+local calls = {}
 local g3Mix = { clockAt = realG3.clockAt }
 function g3Mix.has(version, label)
   return version == "firered" and label == "MUS_PALLET"
 end
 function g3Mix.buildSpecs(song, voicegroups, info)
-  captured = { song = song, voicegroups = voicegroups, info = info }
-  return {
-    { tempo = 160, channels = { { hw = 1, program = {} } } },
-    { tempo = 160, channels = { { hw = 1, program = {} } } },
-  }
+  calls[#calls + 1] = { song = song, voicegroups = voicegroups, info = info }
+  return { { tempo = 160, channels = { { hw = 1, program = {} } } } }
 end
 
 local nds = {}
@@ -67,21 +68,40 @@ function songMap.namesFor(key) return songMap.BY_KEY[key] or {} end
 assert(g4Mix.install({ g3Mix = g3Mix, nds = nds, songMap = songMap,
   versions = versions }) == true)
 
+local function hasNote(data)
+  return data:find(string.char(0xCF), 1, true) ~= nil
+end
+
 local converted, err = g4Mix.convert("firered", "MUS_PALLET")
 assert(converted, err)
-assert(captured and captured.voicegroups[1][1].wave)
-local wave = captured.voicegroups[1][1].wave
+assert(#calls == 2, "gen3 tracks must build one spec each: " .. tostring(#calls))
+assert(calls[1].voicegroups[1][1].wave)
+local wave = calls[1].voicegroups[1][1].wave
 assert(#wave == 32)
 for i = 1, 32 do
   assert(wave[i] == 15, "SWAV samples did not become the GB wave: " .. tostring(wave[i]))
 end
 assert(converted.def.pcm and #converted.def.pcm.events == 1,
   "Gen3 G4 spec missing direct PCM events")
+assert(converted.extra.g4_2 and converted.extra.g4_2.pcm
+  and #converted.extra.g4_2.pcm.events == 1,
+  "Gen3 side spec missing direct PCM events")
 local event = converted.def.pcm.events[1]
 assert(event.bank == 0 and event.archive == 0 and event.wave == 0
   and event.pitch == 60)
 
+calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
-assert(gb.def.pcm == nil, "GB hosts should bake samples into wave RAM")
+assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
+assert(gb.def.converter == "g4_v13", "converter version must bump for PCM")
+assert(gb.def.pcm and #gb.def.pcm.events == 1,
+  "GB base spec must keep PCM refs")
+assert(gb.extra.g4_2 and gb.extra.g4_2.pcm
+  and #gb.extra.g4_2.pcm.events == 1,
+  "GB side spec missing PCM refs")
+assert(hasNote(calls[1].song.trackData[1]),
+  "base GB spec must keep its chip note")
+assert(not hasNote(calls[2].song.trackData[1]),
+  "GB side note must be muted when PCM renders it")
 
 print("g4_pcm_test: ok")

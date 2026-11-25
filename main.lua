@@ -95,15 +95,18 @@ return function(mod)
   local extraAudioFactory = loadModFile("extra_audio.lua")
   local extraAudio = extraAudioFactory and extraAudioFactory()
   local gbaExtraAudio = extraAudioFactory and extraAudioFactory()
+  local function readNdsSample(bank, def)
+    if not ndsImport or not ndsImport.readSample then return nil end
+    local ok, sample = pcall(ndsImport.readSample, bank, def)
+    if ok then return sample end
+  end
   if gbaExtraAudio and gbaExtraAudio.setProfile then
     pcall(gbaExtraAudio.setProfile, "gba")
   end
-  if gbaExtraAudio and gbaExtraAudio.setSampleReader and ndsImport
-      and ndsImport.readSample then
-    pcall(gbaExtraAudio.setSampleReader, function(bank, def)
-      local ok, sample = pcall(ndsImport.readSample, bank, def)
-      if ok then return sample end
-    end)
+  for _, audio in ipairs({ extraAudio, gbaExtraAudio }) do
+    if audio and audio.setSampleReader then
+      pcall(audio.setSampleReader, readNdsSample)
+    end
   end
 
   local function extraVolumeValue(v)
@@ -205,6 +208,7 @@ return function(mod)
           song.generation = 1
           if spec.pan then song.pan = spec.pan end
           if spec.gain then song.gain = spec.gain end
+          if spec.pcm then song.pcm = spec.pcm end
           extraSong[side] = song
         end
       end
