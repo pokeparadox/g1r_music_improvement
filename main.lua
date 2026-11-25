@@ -972,7 +972,7 @@ return function(mod)
     local group = versions.byLabel[canonical]
     local label = group and group.gen3
       or (tostring(canonical):match("^MUS_") and canonical or nil)
-    if g4CandidatesFor and label and versions.mixAllowed(group, hostGeneration) then
+    if g4CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then
       for _, candidate in ipairs(g4CandidatesFor(nativeId, hostGeneration, group)) do
         list[#list + 1] = candidate
       end
@@ -1278,7 +1278,7 @@ return function(mod)
   g4CandidatesFor = function(nativeId, hostGeneration, group)
     local out, seen = {}, {}
     if not g4Mix or not g4Mix.available or not g4Mix.available() then return out end
-    local key = group and group.gen3 or nativeId
+    local key = group and (group.gen3 or group.gen2 or group.gen1) or nativeId
     local function add(version, generation, label)
       local dedupe = tostring(version) .. ":" .. tostring(label)
       if seen[dedupe] then return end

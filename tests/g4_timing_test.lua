@@ -101,11 +101,13 @@ local body = {
 }
 local starts = { 0, 7, 20, 49, 110, 206 }
 local gates = { 7, 13, 29, 61, 96, 48 }
-local previous = 0
+-- Default (mono) note duration advances the track clock, so rests only cover
+-- gaps left by the previous note's end.
+local previousEnd = 0
 for index, start in ipairs(starts) do
-  if start > previous then body[#body + 1] = rest(start - previous) end
+  if start > previousEnd then body[#body + 1] = rest(start - previousEnd) end
   body[#body + 1] = note(60 + index, 100, gates[index])
-  previous = start
+  previousEnd = start + gates[index]
 end
 body[#body + 1] = rest(48)
 
@@ -145,6 +147,45 @@ assert(loopTrack.loopTick == 0, "loop GOTO must target tick 0, got "
 assert(notes[2].tick - notes[1].tick == 7)
 assert((notes[6].tick - notes[1].tick) * 160 == 206 * 160)
 
+-- Without an explicit C7, SSEQ notes are blocking (mono): adjacent notes
+-- start after the previous gate.
+do
+  local adjacent = installFor(string.char(0x81, 0x00)
+    .. note(60, 100, 12) .. note(62, 100, 12) .. rest(12))
+  local adjacentNotes = decodedNotes(adjacent)
+  assert(#adjacentNotes == 2, "adjacent notes lost: " .. tostring(#adjacentNotes))
+  assert(adjacentNotes[1].tick == 0 and adjacentNotes[2].tick == 12,
+    string.format("adjacent note ticks: %d, %d", adjacentNotes[1].tick,
+      adjacentNotes[2].tick))
+  assert(adjacentNotes[1].gate == 12 and adjacentNotes[2].gate == 12,
+    "adjacent note gate drift")
+end
+
+-- C7 0 switches to poly: notes overlap, so consecutive notes share a tick.
+-- Only rests advance the track clock.  HGSS sequences use this for chords.
+do
+  local poly = installFor(string.char(0xC7, 0x00, 0x81, 0x00)
+    .. note(60, 100, 12) .. note(62, 100, 12) .. rest(12))
+  local polyNotes = decodedNotes(poly)
+  assert(#polyNotes == 2, "poly notes lost: " .. tostring(#polyNotes))
+  assert(polyNotes[1].tick == 0 and polyNotes[2].tick == 0,
+    string.format("poly note ticks: %d, %d", polyNotes[1].tick,
+      polyNotes[2].tick))
+  assert(polyNotes[1].gate == 12 and polyNotes[2].gate == 12,
+    "poly note gate drift")
+end
+
+-- C7 1 explicitly restores mono note-wait timing.
+do
+  local mono = installFor(string.char(0xC7, 0x01, 0x81, 0x00)
+    .. note(60, 100, 12) .. note(62, 100, 12) .. rest(12))
+  local monoNotes = decodedNotes(mono)
+  assert(#monoNotes == 2, "mono notes lost: " .. tostring(#monoNotes))
+  assert(monoNotes[1].tick == 0 and monoNotes[2].tick == 12,
+    string.format("mono note ticks: %d, %d", monoNotes[1].tick,
+      monoNotes[2].tick))
+end
+
 -- Volume scaling: 100/127 -> round(100*255/127) = 201, not floor(100/2)=50.
 assert(track:find(string.char(0xBE, 201), 1, true),
   "M4A volume must scale 0..127 to 0..255")
@@ -168,7 +209,6 @@ do
   }
   for i = 1, 32 do
     pattern[#pattern + 1] = note(60 + (i % 5), 100, 12)
-    pattern[#pattern + 1] = rest(12)
   end
   local bytes = installFor(table.concat(pattern))
   local patternNotes, patternTempo = decodedNotes(bytes)
@@ -180,6 +220,17 @@ do
     assert(event.gate == 12)
     assert(event.tick * 160 == (index - 1) * 12 * 160)
   end
+end
+
+-- Poly notes keep sounding across a loop.  The jump must stay at the rest-
+-- driven track clock, not delayed by the last note's gate.
+do
+  local body = string.char(0xC7, 0x00, 0x81, 0x00)
+    .. note(60, 100, 48) .. rest(12)
+    .. string.char(0x94, 0x0A, 0x00, 0x00)
+  local bytes = installFor(body)
+  assert(bytes:find(string.char(0x8C, 0xB2), 1, true),
+    "poly loop must wait only the rest before GOTO, not the note gate")
 end
 
 -- Standalone SSEQ files return the whole blob with a dataOffset base.  Jump

@@ -114,6 +114,18 @@ M.EQUIVALENTS = {
     name = "Safari Zone" },
   { gen1 = "Music_SilphCo", gen3 = "MUS_SILPH", name = "Silph Co." },
   { gen2 = "Music_Evolution", gen3 = "MUS_EVOLUTION", name = "Evolution" },
+
+  -- Johto-only GSC tunes remixed in HGSS. Gen2-only so G4 Mix attaches to the
+  -- native GSC id on GSC hosts instead of exposing raw G4:SEQ_* labels.
+  { gen2 = "Music_NewBarkTown", name = "New Bark Town" },
+  { gen2 = "Music_CherrygroveCity", name = "Cherrygrove City" },
+  { gen2 = "Music_VioletCity", name = "Violet City" },
+  { gen2 = "Music_AzaleaTown", name = "Azalea Town" },
+  { gen2 = "Music_GoldenrodCity", name = "Goldenrod City" },
+  { gen2 = "Music_EcruteakCity", name = "Ecruteak City" },
+  { gen2 = "Music_Route26", name = "Route 26" },
+  { gen2 = "Music_Route29", name = "Route 29" },
+  { gen2 = "Music_Route30", name = "Route 30" },
 }
 
 M.byLabel = {}

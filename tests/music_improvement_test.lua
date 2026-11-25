@@ -917,6 +917,12 @@ T.eq(type(mainSource) == "string"
   and mainSource:find("g4Mix.has(entry.id, candidateLabel)", 1, true) ~= nil,
   true, "G4 candidates enumerate host generation (Gold gets G2 variants)")
 T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "if g4CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then",
+    1, true) ~= nil
+  and mainSource:find("group.gen3 or group.gen2 or group.gen1", 1, true) ~= nil,
+  true, "gen2-only G4 groups use native GSC candidate keys")
+T.eq(type(mainSource) == "string"
   and mainSource:find("local variantIds = {}", 1, true) ~= nil
   and mainSource:find("for _, id in ipairs(ids) do variantIds[#variantIds + 1] = id end",
     1, true) ~= nil

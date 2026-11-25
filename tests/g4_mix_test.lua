@@ -147,8 +147,8 @@ assert(track:find(string.char(0xCF), 1, true), "missing note command")
 assert(track:find(string.char(0xB2), 1, true), "missing loop-back command")
 assert(track:sub(-1):byte() == 0xB1, "missing end command")
 
--- Premix guard: 80 synthetic tracks must collapse under 64, i.e. under the
--- 16-spec limit of extra_audio, while keeping every note/instrument.
+-- Premix guard: 80 synthetic tracks must collapse under 16, the hard slot
+-- limit now that one decoded track becomes one spec, while keeping every note.
 local decoded, rawData = {}, {}
 for i = 1, 80 do
   decoded[i] = {
@@ -166,11 +166,10 @@ local voicegroups = { [1] = {
   [3] = { type = 3 },
 } }
 local premixed = g4Mix.premixDecoded(decoded, voicegroups, rawData)
-assert(premixed and #premixed <= 64, "premix did not cap track count")
+assert(premixed and #premixed <= 16, "premix did not cap track count")
 assert(#premixed < #decoded, "premix did not group tracks")
-local specCount = math.ceil(#premixed / 4)
-assert(specCount <= 16 and specCount - 1 <= 15,
-  "premix must fit 16 side engines, got " .. tostring(specCount))
+assert(#premixed - 1 <= 15,
+  "premix must fit 16 side engines, got " .. tostring(#premixed))
 local noteCount = 0
 for _, bytes in ipairs(premixed) do
   for _, event in ipairs(realG3.decodeTrack(bytes).events) do

@@ -23,6 +23,22 @@ local GROUPS = {
     "SEQ_BLD_GAME", "SEQ_GS_GAME", "SEQ_GS_P_GAME",
   } },
   { key = "Music_Pokecenter", names = { "SEQ_PC_01", "SEQ_PC_02" } },
+  -- Kanto towns still named in the GSC dataset; HGSS GB Sounds scores.
+  { key = "Music_PalletTown", names = {
+    "SEQ_GS_T_MASARA", "SEQ_GS_P_T_MASARA",
+  } },
+  { key = "Music_Cities1", names = {
+    "SEQ_GS_C_TOKIWA", "SEQ_GS_P_C_TOKIWA",
+  } },
+  { key = "Music_Vermilion", names = {
+    "SEQ_GS_C_KUCHIBA", "SEQ_GS_P_C_KUCHIBA",
+  } },
+  { key = "Music_Celadon", names = {
+    "SEQ_GS_C_TAMAMUSHI", "SEQ_GS_P_C_TAMAMUSHI",
+  } },
+  { key = "Music_Lavender", names = {
+    "SEQ_GS_T_CHION", "SEQ_GS_P_T_CHION",
+  } },
   { key = "Music_WildBattle", names = {
     "SEQ_GS_VS_NORAPOKE", "SEQ_GS_VS_NORAPOKE_KANTO",
     "SEQ_GS_P_VS_NORAPOKE", "SEQ_GS_P_VS_NORAPOKE_KANTO", "SEQ_BA_POKE",
@@ -73,6 +89,36 @@ local GROUPS = {
   -- Placeholder used by the generic town family until a concrete GBA song id
   -- is assigned; harmless because G4 candidates require g3Mix.has as well.
   { key = "MUS_TOWN", names = { "SEQ_TOWN01_D", "SEQ_TOWN01_N" } },
+
+  -- Johto GB Sounds scores, named after their Japanese locations. These are
+  -- the HGSS arrangements equivalent to the GSC dataset tunes.
+  { key = "Music_NewBarkTown", names = {
+    "SEQ_GS_T_WAKABA", "SEQ_GS_P_T_WAKABA",
+  } },
+  { key = "Music_CherrygroveCity", names = {
+    "SEQ_GS_C_YOSHINO", "SEQ_GS_P_C_YOSHINO",
+  } },
+  { key = "Music_VioletCity", names = {
+    "SEQ_GS_C_KIKYOU", "SEQ_GS_P_C_KIKYOU",
+  } },
+  { key = "Music_AzaleaTown", names = {
+    "SEQ_GS_T_HIWADA", "SEQ_GS_P_T_HIWADA",
+  } },
+  { key = "Music_GoldenrodCity", names = {
+    "SEQ_GS_C_KOGANE", "SEQ_GS_P_C_KOGANE",
+  } },
+  { key = "Music_EcruteakCity", names = {
+    "SEQ_GS_C_ENJU", "SEQ_GS_P_C_ENJU",
+  } },
+  { key = "Music_Route26", names = {
+    "SEQ_GS_R_1_26", "SEQ_GS_P_R_1_26",
+  } },
+  { key = "Music_Route29", names = {
+    "SEQ_GS_R_1_29", "SEQ_GS_P_R_1_29",
+  } },
+  { key = "Music_Route30", names = {
+    "SEQ_GS_R_1_30", "SEQ_GS_P_R_1_30",
+  } },
 }
 
 M.BY_NAME = {}

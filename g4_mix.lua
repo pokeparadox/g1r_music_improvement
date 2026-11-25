@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v5"
+local CONVERTER_VERSION = "g4_v11"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -420,16 +420,20 @@ local function noteDefFor(instrument, rawKey)
   if defs.type ~= nil or defs.waveID ~= nil or defs.waveID_dutyCycle ~= nil then
     defs = { defs }
   end
-  for index = 0, 255 do
-    local def = defs[index]
-    if type(def) == "table" then
-      local low, high = def.keyLow, def.keyHigh
-      if (low == nil or rawKey >= low) and (high == nil or rawKey <= high) then
-        return def
+  -- nds_import stores note definitions at indexes 1..n; older fixtures use
+  -- 0-based arrays.  Check both before falling back to a generic wave.
+  local function find(from, to)
+    for index = from, to do
+      local def = defs[index]
+      if type(def) == "table" then
+        local low, high = def.keyLow, def.keyHigh
+        if (low == nil or rawKey >= low) and (high == nil or rawKey <= high) then
+          return def
+        end
       end
     end
   end
-  return DEFAULT_DEF
+  return find(1, 256) or find(0, 255) or DEFAULT_DEF
 end
 
 -- SWAV samples are the only real timbre information in an HGSS bank.  The GB
@@ -518,15 +522,51 @@ local function hashKey(text)
   return hash
 end
 
+-- SBNK PSG duty 0..6 is 12.5%..87.5%; GB has four duty settings.  Map to the
+-- nearest available setting instead of duty%4, which wraps the wide duties.
+local SBNK_DUTY = { [0] = 0, [1] = 1, [2] = 2, [3] = 2, [4] = 3, [5] = 3, [6] = 3 }
+
 -- One synthetic voice per (bank, instrument, note definition).  More than 255
 -- distinct voices reuse a slot by hash; real songs never reach that cap.
-local function voiceContext()
-  local context = { voices = { [1] = {} }, byKey = {}, nextVoice = 1 }
+local function voiceContext(generation)
+  local context = {
+    voices = { [1] = {} }, byKey = {}, nextVoice = 1,
+    leadStats = {}, generation = generation,
+  }
+  -- Gen2 has no PCM side stream, so a sampled SWAV lead is a 32-step wave
+  -- "beep". Collect long/high wave voices and give them a pulse/duty fallback.
+  function context:markLead(id, key, gate)
+    if generation >= 3 or not id then return end
+    local voice = self.voices[1][id]
+    if not voice or voice.type ~= 3 then return end
+    local stats = self.leadStats[id]
+    if not stats then
+      stats = { count = 0, long = 0, keySum = 0, gateSum = 0 }
+      self.leadStats[id] = stats
+    end
+    local noteKey, noteGate = tonumber(key) or 0, tonumber(gate) or 0
+    stats.count = stats.count + 1
+    stats.keySum = stats.keySum + noteKey
+    stats.gateSum = stats.gateSum + noteGate
+    if noteGate >= 6 then stats.long = stats.long + 1 end
+  end
+  function context:finalizeLeads()
+    if generation >= 3 then return end
+    for id, stats in pairs(self.leadStats) do
+      local count = stats.count
+      if count >= 3 and stats.long / count >= 0.8
+          and stats.keySum / count >= 60 and stats.gateSum / count >= 10 then
+        self.voices[1][id].leadDuty = 2
+      end
+    end
+  end
   function context:voice(bankID, program, rawKey)
     local bank = bankFor(bankID) or bankFor(0)
     local instruments = bank and bank.instruments
-    local instrument = instruments and (instruments[program]
-      or instruments[tostring(program)] or instruments[program + 1])
+    -- nds_import returns 1-based instrument arrays: program N -> index N+1.
+    -- Keep the 0-based lookup for older synthetic fixtures.
+    local instrument = instruments and (instruments[program + 1]
+      or instruments[program] or instruments[tostring(program)])
     local def = noteDefFor(instrument, rawKey)
     local duty = tonumber(def.waveID_dutyCycle or def.waveID) or 0
     local key = table.concat({
@@ -542,7 +582,7 @@ local function voiceContext()
     local defType = tonumber(def.type) or 1
     local tone
     if defType == 2 then
-      tone = { type = 1 + (duty % 2), wavParam = duty % 4 }
+      tone = { type = 1, wavParam = SBNK_DUTY[duty] or 2 }
     elseif defType == 3 then
       tone = { type = 4 }
     else
@@ -584,9 +624,12 @@ local function trackStarts(seq)
   end
   local mask = u16le(data, header + 1) or 0
   local cursor = header + 3
+  local explicitMain = false
   for track = 0, MAX_TRACKS - 1 do
     if math.floor(mask / (2 ^ track)) % 2 == 1 then
       if byte(data, cursor) ~= 0x93 then break end
+      local trackNo = byte(data, cursor + 1) or 0
+      if trackNo == 0 then explicitMain = true end
       local offset = u24le(data, cursor + 2)
       cursor = cursor + 5
       -- SequenceEvent offsets are relative to the events-data base, even when
@@ -596,47 +639,72 @@ local function trackStarts(seq)
       end
     end
   end
+  -- SSEQ track 0 is the decoder continuation after the 0x93 header commands,
+  -- not one of those commands. Older synthetic fixtures declare it explicitly
+  -- with `0x93 0x00`, so only add the implicit start when none was declared.
+  if not explicitMain and cursor < #data and byte(data, cursor) ~= 0xFF then
+    starts[#starts + 1] = { offset = cursor }
+  end
   if #starts == 0 then starts[1] = { offset = header } end
   return starts
 end
 
 -- Skip operands of variable/conditional events that do not affect audible
--- notes.  Lengths follow ndspy's SequenceEvent.dataLength table.
+-- notes. Lengths follow ndspy's SequenceEvent.dataLength table. `pc` already
+-- points just past the opcode, so each return is dataLength - 1.
+local function randomSubLength(data, pc)
+  local sub = byte(data, pc) or 0
+  if sub <= 0x7F then return 7 end
+  if sub == 0x80 or sub == 0x81 then return 2 end
+  if sub == 0x93 then return 5 end
+  if sub == 0x94 or sub == 0x95 then return 4 end
+  if sub == 0xA0 then return 7 end
+  if sub == 0xA1 then
+    local nested = byte(data, pc + 1) or 0
+    return nested >= 0xB0 and nested <= 0xBD and 4 or 3
+  end
+  if sub == 0xA2 or sub == 0xFC or sub == 0xFD or sub == 0xFF then return 1 end
+  if sub >= 0xB0 and sub <= 0xBD then return 4 end
+  if sub == 0xE0 or sub == 0xE1 or sub == 0xE3 then return 3 end
+  if sub == 0xFE then return 3 end
+  return 2
+end
+
 local function skipEvent(data, pc, cmd)
   if cmd == 0xA0 then
     local sub = byte(data, pc) or 0
-    pc = pc + 1
     if sub <= 0x7F then return pc + 6 end
-    local extra = 0
-    if sub <= 0x7F then extra = 3
-    elseif sub <= 0xCF then extra = 1
-    elseif sub <= 0xDF then extra = 2
-    elseif sub <= 0xEF then extra = 3
-    else extra = 4 end
-    return pc + 3 + extra
+    return pc + 3 + randomSubLength(data, pc)
   elseif cmd == 0xA1 then
     local sub = byte(data, pc) or 0
-    return pc + (sub >= 0xB0 and sub <= 0xBD and 4 or 3)
+    return pc + (sub >= 0xB0 and sub <= 0xBD and 3 or 2)
   elseif cmd >= 0xB0 and cmd <= 0xBD then
-    return pc + 4
-  elseif cmd >= 0xC0 and cmd <= 0xD6 then
-    return pc + 2
-  elseif cmd == 0xE0 or cmd == 0xE1 or cmd == 0xE3 then
     return pc + 3
+  elseif cmd >= 0xC0 and cmd <= 0xD6 then
+    return pc + 1
+  elseif cmd == 0xE0 or cmd == 0xE1 or cmd == 0xE3 then
+    return pc + 2
+  elseif cmd == 0xFE then
+    return pc + 2
   end
   return pc
 end
 
-local function decodeTrack(seq, start, voices)
+local function decodeTrack(seq, start, voices, songBank)
   local data, base = seq.data, seq.base
   local events = {}
   local pc, tick = start, 0
   local count, steps = 0, 0
   local callStack, visited = {}, {}
-  local bankID, program, loopPc, loopEventIndex, loopEndTick
+  local bankID, program = songBank or 0, 0
+  local loopPc, loopEventIndex, loopEndTick
   local volume, master, pan, transpose, bend, bendRange = 127, 127, 0x40, 0, 0, 2
   local loopStart
   local cmdPc
+  -- SSEQ default is monophonic: a note blocks the track until its gate ends.
+  -- C7 0 switches to polyphony, where notes overlap and only rests advance
+  -- the track clock.
+  local noteWait = true
   local function add(kind, fields)
     count = count + 1
     local event = fields or {}
@@ -649,7 +717,7 @@ local function decodeTrack(seq, start, voices)
   end
   -- SSEQ starts at 120 BPM.  M4A defaults to 150, so seed the real default at
   -- tick 0; explicit 0xE1 at tick 0 overwrites it instead of adding a duplicate.
-  local defaultTempo = add("tempo", { bpm = 120 })
+  local defaultTempo = add("tempo", { bpm = 120, default = true })
   while steps < MAX_STEPS and count < MAX_EVENTS and tick <= MAX_TICKS do
     steps = steps + 1
     -- Revisiting a byte offset means the jump/call chain closed a loop.  Point
@@ -677,15 +745,22 @@ local function decodeTrack(seq, start, voices)
       local duration, nextPc = varint(data, pc)
       pc = nextPc or pc
       local vel = rawVel % 128
+      -- Gate is the note's sounding duration.  Only monophonic tracks wait
+      -- for it before the next event; polyphonic tracks overlap notes and
+      -- advance on rests alone.
+      local gate = math.max(1, seqTicks(duration))
       if vel >= 20 then
+        local voice = voices:voice(bankID, program, cmd)
+        voices:markLead(voice, cmd + transpose, gate)
         add("note", {
           key = cmd + transpose, rawKey = cmd, vel = vel,
-          gate = math.max(1, seqTicks(duration)),
-          voice = voices:voice(bankID, program, cmd),
+          gate = gate, longGate = gate >= 6,
+          voice = voice,
           volume = clamp(math.floor(volume * master / 127), 1, 255),
           pan = pan, bend = bend, bendRange = bendRange,
         })
       end
+      if noteWait then tick = tick + gate end
     elseif cmd == 0x80 then
       local duration, nextPc = varint(data, pc)
       pc = nextPc or pc
@@ -694,7 +769,10 @@ local function decodeTrack(seq, start, voices)
       local value, nextPc = varint(data, pc)
       pc = nextPc or pc
       value = value or 0
-      program, bankID = value % 128, math.floor(value / 128)
+      program = value % 128
+      -- Bank 0 in a program event means "keep the sequence's current bank".
+      local override = math.floor(value / 128)
+      if override > 0 then bankID = override end
     elseif cmd == 0x93 then
       pc = pc + 4
     elseif cmd == 0x94 then
@@ -740,6 +818,11 @@ local function decodeTrack(seq, start, voices)
       bendRange = byte(data, pc) or 2
       add("bendRange", { value = bendRange })
       pc = pc + 1
+    elseif cmd == 0xC7 then
+      -- 0 = poly (non-blocking notes), 1 = mono (note wait).  SSEQ default
+      -- is mono, so tracks that omit C7 keep the original timing.
+      noteWait = (byte(data, pc) or 0) ~= 0
+      pc = pc + 1
     elseif cmd >= 0xD0 and cmd <= 0xD3 then
       local value = byte(data, pc) or 0
       add("envelope", { field = cmd - 0xD0, value = value })
@@ -759,6 +842,7 @@ local function decodeTrack(seq, start, voices)
       local bpm = u16le(data, pc) or 120
       if tick == 0 then
         defaultTempo.bpm = bpm
+        defaultTempo.default = false
       else
         add("tempo", { bpm = bpm })
       end
@@ -769,9 +853,13 @@ local function decodeTrack(seq, start, voices)
       pc = skipEvent(data, pc, cmd)
     end
   end
+  -- Keep sounding note tails in `ticks` for PCM length, but leave the loop
+  -- point at the track clock.  Poly notes continue across a loop; delaying
+  -- the loop until their gate ends would stretch the song.
+  local ticks = tick
   for _, event in ipairs(events) do
     if event.kind == "note" then
-      tick = math.max(tick, event.tick + event.gate)
+      ticks = math.max(ticks, event.tick + event.gate)
     end
   end
   if loopEventIndex and loopEventIndex <= #events then
@@ -781,7 +869,7 @@ local function decodeTrack(seq, start, voices)
     loopStart = nil
   end
   return {
-    events = events, ticks = tick,
+    events = events, ticks = ticks,
     loopStart = loopStart, loopEndTick = loopEndTick or tick,
   }
 end
@@ -905,16 +993,16 @@ local function mergeDecoded(tracks)
     if a._source ~= b._source then return (a._source or 0) < (b._source or 0) end
     return (a.seq or 0) < (b.seq or 0)
   end)
-  local loopStart, loopEnd, ticks = nil, nil, 1
-  for _, track in ipairs(tracks) do
+  local loopStart, loopEnd, loopSource, ticks = nil, nil, nil, 1
+  for source, track in ipairs(tracks) do
     if not loopStart and track.loopStart then
-      loopStart, loopEnd = track.loopStart, track.loopEndTick
+      loopStart, loopEnd, loopSource = track.loopStart, track.loopEndTick, source
     end
     ticks = math.max(ticks, track.ticks or 0)
   end
   if loopStart then
     for _, event in ipairs(events) do
-      if event.tick == loopStart.tick and event._source == 1 then
+      if event.tick == loopStart.tick and event._source == loopSource then
         event.loopStart = true
         break
       end
@@ -956,9 +1044,9 @@ function M.premixDecoded(decodedTracks, voicegroups, trackData)
         index = indexes[1], merged = true }
     end
   end
-  -- Keep buildSpecs under 64 tracks even if a dataset has unusually many
-  -- distinct instrument classes; fold the tail into the first bucket.
-  while #entries > 64 do
+  -- One decoded track now becomes one spec, so 16 entries is the hard limit.
+  -- Fold the tail into the first bucket when a dataset has too many classes.
+  while #entries > 16 do
     local last = table.remove(entries)
     local first = entries[1]
     local combined = {}
@@ -976,13 +1064,58 @@ function M.premixDecoded(decodedTracks, voicegroups, trackData)
   return out, groupedDecoded
 end
 
-local function buildSong(seq, bankID)
+-- SSEQ 0xE1 is global even when only the implicit main track carries it.
+-- Share the timeline so side engines do not stay at 120 BPM and drift.
+local function propagateTempo(tracks)
+  local byTick = {}
+  for _, track in ipairs(tracks) do
+    for _, event in ipairs(track.events or {}) do
+      if event.kind == "tempo" then
+        local current = byTick[event.tick]
+        if not current or (current.default and not event.default) then
+          byTick[event.tick] = event
+        end
+      end
+    end
+  end
+  local timeline = {}
+  for tick, event in pairs(byTick) do
+    timeline[#timeline + 1] = { tick = tick, bpm = event.bpm }
+  end
+  table.sort(timeline, function(a, b) return a.tick < b.tick end)
+
+  for _, track in ipairs(tracks) do
+    local events, inserted = {}, {}
+    local function addTemposBefore(limit)
+      for index, item in ipairs(timeline) do
+        if not inserted[index] and item.tick <= limit then
+          events[#events + 1] = { kind = "tempo", tick = item.tick, bpm = item.bpm }
+          inserted[index] = true
+        end
+      end
+    end
+    for _, event in ipairs(track.events or {}) do
+      if event.kind ~= "tempo" then
+        addTemposBefore(event.tick)
+        events[#events + 1] = event
+      end
+    end
+    addTemposBefore(math.huge)
+    track.events = events
+  end
+end
+
+local function buildSong(seq, bankID, generation)
   local starts = trackStarts(seq)
-  local voices = voiceContext()
+  local voices = voiceContext(generation)
   local trackData, decodedTracks = {}, {}
   for _, start in ipairs(starts) do
-    local decoded = decodeTrack(seq, start.offset, voices)
-    decodedTracks[#decodedTracks + 1] = decoded
+    decodedTracks[#decodedTracks + 1] =
+      decodeTrack(seq, start.offset, voices, bankID, generation)
+  end
+  propagateTempo(decodedTracks)
+  voices:finalizeLeads()
+  for _, decoded in ipairs(decodedTracks) do
     trackData[#trackData + 1] = synthTrack(decoded)
   end
   return {
@@ -1042,15 +1175,17 @@ function M.convert(version, label)
   if not song then return setError("no imported SSEQ for " .. tostring(label)) end
   local seq = sequenceFor(song)
   if not seq then return setError("no sequence data for " .. tostring(song.name)) end
-  local songDef, voicegroups, decodedTracks = buildSong(seq, tonumber(song.bank))
+  local generation = generationForVersion(version)
+  local songDef, voicegroups, decodedTracks =
+    buildSong(seq, tonumber(song.bank), generation)
   if not songDef or songDef.tracks < 1 then
     return setError("no tracks for " .. tostring(song.name))
   end
-  -- Gen3 extras map to engine slots g4_2..g4_16.  Premix only when the source
-  -- would overflow those slots; smaller songs keep the legacy byte-for-byte.
+  -- One decoded track becomes one chip spec, so 16 slots is the hard ceiling.
+  -- Premix only when the source would overflow those slots.
   local sourceTracks = songDef.tracks
   local groupedTracks = decodedTracks
-  if sourceTracks > 64 then
+  if sourceTracks > 16 then
     local grouped, groupedDecoded = M.premixDecoded(decodedTracks,
       voicegroups, songDef.trackData)
     if grouped then
@@ -1061,37 +1196,44 @@ function M.convert(version, label)
       groupedTracks = groupedDecoded
     end
   end
-  local ok, specs = pcall(deps.g3Mix.buildSpecs, songDef, voicegroups,
-    { voicegroupId = 1 })
-  if not ok then return setError("buildSpecs: " .. tostring(specs)) end
-  if type(specs) ~= "table" or not specs[1] then
-    return setError("no chip specs")
+  -- One spec per decoded track. The old four-tracks-per-spec grouping made
+  -- short voices wait at the longest track's loop point, sounding like a pause.
+  local specs, specTracks = {}, {}
+  for trackIndex, trackBytes in ipairs(songDef.trackData) do
+    local perTrackSong = {
+      name = songDef.name, tracks = 1, trackData = { trackBytes },
+      voicegroup = 1,
+    }
+    local built
+    local ok, result = pcall(deps.g3Mix.buildSpecs, perTrackSong, voicegroups,
+      { voicegroupId = 1 })
+    if not ok then return setError("buildSpecs: " .. tostring(result)) end
+    if type(result) ~= "table" or not result[1] then
+      return setError("no chip specs for track " .. tostring(trackIndex))
+    end
+    for _, spec in ipairs(result) do
+      specs[#specs + 1] = spec
+      specTracks[#specTracks + 1] = groupedTracks[trackIndex]
+    end
   end
-  local generation = generationForVersion(version)
   local def = specs[1]
   def.generation = generation
   def.g4Mix = true
   def.converter = CONVERTER_VERSION
-  for i = 1, #specs do
-    local first = (i - 1) * 4 + 1
-    local slice = {}
-    for index = first, math.min(first + 3, #groupedTracks) do
-      slice[#slice + 1] = groupedTracks[index]
-    end
-    specs[i].pcm = pcmForTracks(slice, voicegroups, generation)
-  end
   if sourceTracks > songDef.tracks then
     def.premix = true
     def.sourceTracks = sourceTracks
   end
   local extra = {}
-  for i = 2, #specs do
-    local spec = specs[i]
-    spec.generation = generation
-    spec.g4Mix = true
-    spec.converter = CONVERTER_VERSION
-    spec.premix = def.premix or nil
-    extra["g4_" .. i] = spec
+  for i, spec in ipairs(specs) do
+    spec.pcm = pcmForTracks({ specTracks[i] }, voicegroups, generation)
+    if i > 1 then
+      spec.generation = generation
+      spec.g4Mix = true
+      spec.converter = CONVERTER_VERSION
+      spec.premix = def.premix or nil
+      extra["g4_" .. i] = spec
+    end
   end
   return { def = def, extra = extra, tracks = songDef.tracks }
 end

@@ -490,6 +490,14 @@ local function toneInfo(voicegroups, vgId, note, specWaves)
   local typ = tone and tone.type or 0
   local kind = typ % 8
   if kind < 1 or kind > 4 then kind = 1 end
+  -- G4 Mix gen2 fallback: sustained sampled voices cannot sound like their
+  -- source on the 32-step wave channel. A duty pulse plus the normal
+  -- envelope keeps the lead line audible without touching gen3 PCM refs.
+  if kind == 3 and tone and tone.leadDuty then
+    local duty = math.max(0, math.min(3,
+      math.floor(tonumber(tone.leadDuty) or 2)))
+    return 1, duty, nil, tone
+  end
   if kind == 1 or kind == 2 then
     local wp = tone and tone.wavParam or 0
     return kind, wp <= 3 and wp or 2, nil, tone
@@ -627,6 +635,12 @@ function M.envelopeFor(note, duty)
     fade, resolvedDuty = -1, 3
   elseif decay > 0 then
     fade = 1
+  end
+  -- G4 gen2 lead fallback: ADSR must shape the envelope, not replace the
+  -- duty chosen to keep a sustained sampled voice audible.
+  if tone.leadDuty then
+    resolvedDuty = math.max(0, math.min(3,
+      math.floor(tonumber(tone.leadDuty) or duty or 2)))
   end
   return volume, math.max(-7, math.min(7, fade)), resolvedDuty
 end
