@@ -695,6 +695,13 @@ for _, id in ipairs(exports.musicIds({ data = Data })) do
 end
 T.check(not mixListed, "mix variants are not separate music test rows")
 Data.audio.songs.Music_MixGen1CacheTest_firered = nil
+Data.audio.songs.Music_G4MixGen1CacheTest_firered = {}
+local g4MixListed = false
+for _, id in ipairs(exports.musicIds({ data = Data })) do
+  if id == "Music_G4MixGen1CacheTest_firered" then g4MixListed = true end
+end
+T.check(not g4MixListed, "G4 Mix variants are not separate music test rows")
+Data.audio.songs.Music_G4MixGen1CacheTest_firered = nil
 
 -- ------- the hook defers songs without an improved mapping
 

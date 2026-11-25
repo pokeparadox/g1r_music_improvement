@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v14"
+local CONVERTER_VERSION = "g4_v15"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -695,7 +695,7 @@ local function decodeTrack(seq, start, voices, songBank)
   local events = {}
   local pc, tick = start, 0
   local count, steps = 0, 0
-  local callStack, visited = {}, {}
+  local callStack, frames = {}, { { visited = {} } }
   local bankID, program = songBank or 0, 0
   local loopPc, loopEventIndex, loopEndTick
   local volume, master, pan, transpose, bend, bendRange = 127, 127, 0x40, 0, 0, 2
@@ -718,12 +718,17 @@ local function decodeTrack(seq, start, voices, songBank)
   -- SSEQ starts at 120 BPM.  M4A defaults to 150, so seed the real default at
   -- tick 0; explicit 0xE1 at tick 0 overwrites it instead of adding a duplicate.
   local defaultTempo = add("tempo", { bpm = 120, default = true })
+  -- Loop detection is per call frame. HGSS songs CALL the same subroutine
+  -- from several places; a global visited set treats the second call as a
+  -- loop and drops every later section. A true loop is a revisit inside the
+  -- same frame, usually a JUMP back into the main body.
   while steps < MAX_STEPS and count < MAX_EVENTS and tick <= MAX_TICKS do
     steps = steps + 1
-    -- Revisiting a byte offset means the jump/call chain closed a loop.  Point
-    -- the chip GOTO at the first event emitted from that offset, not at the
-    -- declaring track start; SSEQ tracks routinely share a prefix region.
-    if visited[pc] then
+    local frame = frames[#frames]
+    -- Revisiting a byte offset in the same frame means the jump chain closed
+    -- a loop. Point the chip GOTO at the first event emitted from that offset,
+    -- not at the declaring track start; SSEQ tracks routinely share prefixes.
+    if frame.visited[pc] then
       if not loopPc then
         loopPc = pc
         loopEndTick = tick
@@ -734,7 +739,7 @@ local function decodeTrack(seq, start, voices, songBank)
       end
       break
     end
-    visited[pc] = true
+    frame.visited[pc] = true
     local cmd = byte(data, pc)
     if cmd == nil then break end
     cmdPc = pc
@@ -793,6 +798,7 @@ local function decodeTrack(seq, start, voices, songBank)
         break
       end
       callStack[#callStack + 1] = pc
+      frames[#frames + 1] = { visited = {} }
       pc = target
     elseif cmd == 0xA2 then
       -- Conditional skip: leave the flag unset, i.e. execute the next event.
@@ -838,7 +844,12 @@ local function decodeTrack(seq, start, voices, songBank)
     elseif cmd == 0xFC then
       if loopPc then loopEndTick = tick break end
     elseif cmd == 0xFD then
-      if #callStack > 0 then pc = table.remove(callStack) else break end
+      if #callStack > 0 then
+        pc = table.remove(callStack)
+        frames[#frames] = nil
+      else
+        break
+      end
     elseif cmd == 0xE1 then
       local bpm = u16le(data, pc) or 120
       if tick == 0 then

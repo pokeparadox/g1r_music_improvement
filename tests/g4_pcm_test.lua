@@ -98,7 +98,7 @@ assert(converted.def.pcm.loopStartTick == 0
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v14", "converter version must bump for PCM")
+assert(gb.def.converter == "g4_v15", "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
 assert(gb.extra.g4_2 and gb.extra.g4_2.pcm

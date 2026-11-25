@@ -1797,7 +1797,8 @@ return function(mod)
   local function musicIds(game)
     local ids, seen = {}, {}
     for id in mod.content.music:each() do
-      if not seen[id] and not tostring(id):match("^Music_Mix") then
+      if not seen[id] and not tostring(id):match("^Music_Mix")
+          and not tostring(id):match("^Music_G4Mix") then
         seen[id] = true; ids[#ids + 1] = id
       end
     end
@@ -1805,7 +1806,8 @@ return function(mod)
       and game.data.audio.songs
     if type(songs) == "table" then
       for id in pairs(songs) do
-        if not seen[id] and not tostring(id):match("^Music_Mix") then
+        if not seen[id] and not tostring(id):match("^Music_Mix")
+            and not tostring(id):match("^Music_G4Mix") then
           seen[id] = true; ids[#ids + 1] = id
         end
       end
@@ -2274,7 +2276,8 @@ return function(mod)
     for _, id in ipairs(natives) do
       if not versions.byLabel[id]
           and not tostring(id):match("^Music_Improved")
-          and not tostring(id):match("^Music_Stock") then
+          and not tostring(id):match("^Music_Stock")
+          and not tostring(id):match("^Music_G4Mix") then
         local variants = { { native = true, generation = hostGen, improved = false } }
         local base = baseImprovedVariant(id, hostGen)
         if base then variants[#variants + 1] = base end
