@@ -150,14 +150,18 @@ return function()
     pcm.pos = pos
     pcm.active = {}
     pcm.cycle = 0
-    pcm.nextEvent = 1
+    local first = 1
     local target = pos
-    if pcm.loopSamples and pcm.loopSamples > 0 and pos >= pcm.loopSamples then
-      pcm.cycle = math.floor(pos / pcm.loopSamples)
-      target = pos - pcm.cycle * pcm.loopSamples
+    if pcm.loopSamples and pcm.loopSamples > 0
+        and pos >= (pcm.loopEndSamples or 0) then
+      local start = pcm.loopStartSamples or 0
+      pcm.cycle = math.floor((pos - start) / pcm.loopSamples)
+      target = start + (pos - start) % pcm.loopSamples
+      first = pcm.firstLoopEvent or 1
     end
-    for index, event in ipairs(pcm.events) do
-      if event.at >= target then pcm.nextEvent = index break end
+    pcm.nextEvent = first
+    for index = first, #pcm.events do
+      if pcm.events[index].at >= target then pcm.nextEvent = index break end
     end
   end
 
@@ -206,10 +210,24 @@ return function()
     table.sort(events, function(a, b) return a.at < b.at end)
     local built = {
       events = events, active = {}, pos = 0, nextEvent = 1, cycle = 0,
-      loopSamples = pcm.loopTick and pcm.loopTick > 0
-        and pcmTickToSample(timeline, pcm.loopTick) or 0,
       looping = true,
     }
+    local loopStartTick = tonumber(pcm.loopStartTick) or 0
+    local loopEndTick = tonumber(pcm.loopEndTick)
+      or tonumber(pcm.loopTick) or 0
+    built.loopStartSamples = pcmTickToSample(timeline, loopStartTick)
+    built.loopEndSamples = pcmTickToSample(timeline, loopEndTick)
+    built.loopSamples = math.max(0,
+      built.loopEndSamples - built.loopStartSamples)
+    built.firstLoopEvent = 1
+    if built.loopSamples > 0 then
+      for index, event in ipairs(events) do
+        if event.at >= built.loopStartSamples then
+          built.firstLoopEvent = index
+          break
+        end
+      end
+    end
     pcmSeek(built, 0)
     return built
   end
@@ -222,8 +240,8 @@ return function()
       local event = pcm.events[pcm.nextEvent]
       if not event and pcm.loopSamples > 0 then
         pcm.cycle = pcm.cycle + 1
-        pcm.nextEvent = 1
-        event = pcm.events[1]
+        pcm.nextEvent = pcm.firstLoopEvent or 1
+        event = pcm.events[pcm.nextEvent]
       end
       if not event then break end
       local at = event.at + pcm.cycle * pcm.loopSamples
@@ -235,14 +253,17 @@ return function()
         if rate < 1000 then rate = SAMPLE_RATE end
         local loopStart = math.max(0, math.floor(tonumber(event.sample.loopStart) or 0))
         local loopEnd = math.floor(tonumber(event.sample.loopEnd) or frames - 1)
-        if loopEnd <= loopStart then loopEnd = frames - 1 end
+        if loopEnd > frames - 1 then loopEnd = frames - 1 end
+        if loopStart > frames - 1 then loopStart = frames - 1 end
+        local hasLoop = event.sample.loop and loopEnd > loopStart
+        if not hasLoop then loopStart = 0 end
         local ratio = rate / SAMPLE_RATE
           * 2 ^ ((event.key - event.pitch) / 12)
         local pan = math.max(-1, math.min(1, (event.pan - 0x40) / 0x80))
         pcm.active[#pcm.active + 1] = {
-          data = data, phase = loopStart,
-          endFrame = loopEnd > loopStart and loopEnd or frames - 1,
-          loop = event.sample.loop and loopEnd > loopStart or false,
+          data = data, phase = 0, loopStart = loopStart,
+          endFrame = hasLoop and loopEnd or frames - 1,
+          loop = hasLoop and true or false,
           step = ratio, start = at,
           stop = at + event.gateSamples + math.floor(SAMPLE_RATE * 0.08),
           gateEnd = at + event.gateSamples,
@@ -283,7 +304,7 @@ return function()
           voice.phase = voice.phase + voice.step
           if voice.phase >= voice.endFrame then
             if voice.loop then
-              voice.phase = voice.phase - voice.endFrame
+              voice.phase = voice.loopStart + (voice.phase - voice.endFrame)
             else
               voice.phase = voice.endFrame - 1
             end

@@ -14,6 +14,7 @@ local events = string.char(
   0xE1, 120, 0x00,
   0x81, 0x00,
   0x3C, 100, 48,
+  0x94, 18, 0x00, 0x00,
   0xFF
 )
 local events2 = string.char(0x81, 0x00, 0x3C, 100, 48, 0xFF)
@@ -89,11 +90,15 @@ assert(converted.extra.g4_2 and converted.extra.g4_2.pcm
 local event = converted.def.pcm.events[1]
 assert(event.bank == 0 and event.archive == 0 and event.wave == 0
   and event.pitch == 60)
+assert(converted.def.pcm.loopStartTick == 0
+  and converted.def.pcm.loopEndTick == 48
+  and converted.def.pcm.loopTick == 48,
+  "PCM loop must cover only GOTO body, not song start")
 
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v13", "converter version must bump for PCM")
+assert(gb.def.converter == "g4_v14", "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
 assert(gb.extra.g4_2 and gb.extra.g4_2.pcm

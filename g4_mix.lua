@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v13"
+local CONVERTER_VERSION = "g4_v14"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -1136,7 +1136,7 @@ end
 local function pcmForTracks(tracks, voicegroups, generation)
   if generation < 1 or generation > 3 then return nil end
   local events, timeline = {}, { { tick = 0, tempo = 240 } }
-  local loopTick
+  local loopStartTick, loopEndTick, loopTick
   for _, track in ipairs(tracks or {}) do
     for _, event in ipairs(track.events or {}) do
       if event.kind == "tempo" then
@@ -1161,9 +1161,13 @@ local function pcmForTracks(tracks, voicegroups, generation)
         end
       end
     end
-    if track.loopStart then
-      loopTick = math.min(loopTick or math.huge,
-        tonumber(track.loopEndTick) or tonumber(track.ticks) or math.huge)
+    if track.loopStart and not loopTick then
+      local start = tonumber(track.loopStart.tick) or 0
+      local finish = tonumber(track.loopEndTick) or tonumber(track.ticks) or 0
+      if finish > start then
+        loopStartTick, loopEndTick = start, finish
+        loopTick = finish - start
+      end
     end
   end
   if #events == 0 then return nil end
@@ -1171,7 +1175,8 @@ local function pcmForTracks(tracks, voicegroups, generation)
   table.sort(timeline, function(a, b) return a.tick < b.tick end)
   return {
     events = events, tempoTimeline = timeline,
-    loopTick = loopTick == math.huge and 0 or loopTick,
+    loopStartTick = loopStartTick or 0, loopEndTick = loopEndTick or 0,
+    loopTick = loopTick or 0,
   }
 end
 

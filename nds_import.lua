@@ -874,6 +874,22 @@ local function readSampleUncached(bankID, noteDef, archiveID, waveID)
     data = decodeAdpcm(raw)
   end
   if not data then return nil end
+  -- SWAV loop points are in 4-byte words. Convert to decoded sample frames:
+  -- PCM8 4 frames/word, PCM16 2, ADPCM 8 minus the 4-byte header.
+  local frames = math.floor(#data / 2)
+  local wordFrames = format == 0 and 4 or (format == 1 and 2 or 8)
+  local function loopFrame(word, upper)
+    local value = word * wordFrames
+    if format == 2 then value = value - 8 end
+    if value < 0 then value = 0 end
+    value = math.floor(value + 0.5)
+    local limit = upper and frames or math.max(0, frames - 1)
+    if value > limit then value = limit end
+    return value
+  end
+  local loopStart = loopFrame(loopOffset, false)
+  local loopEnd = loopFrame(loopOffset + loopLength, true)
+  if loopEnd <= loopStart then loopEnd = math.min(frames, loopStart + 1) end
   return {
     bankID = bankID,
     archiveID = archiveID,
@@ -881,8 +897,8 @@ local function readSampleUncached(bankID, noteDef, archiveID, waveID)
     format = format,
     sampleRate = sampleRate,
     loop = loopFlag ~= 0 and true or false,
-    loopStart = loopOffset,
-    loopEnd = loopOffset + loopLength,
+    loopStart = loopStart,
+    loopEnd = loopEnd,
     data = data,
     sourceSize = #raw,
   }
