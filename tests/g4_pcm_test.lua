@@ -98,9 +98,13 @@ assert(converted.def.pcm.loopStartTick == 0
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v15", "converter version must bump for PCM")
+assert(gb.def.converter == "g4_v16", "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
+assert(gb.def.pcm.tempoTimeline[1].tempo == 240
+  and gb.def.pcm.tempoTimeline[1].gb == 160,
+  "GB PCM tempo must carry the chip tempo byte: "
+    .. tostring(gb.def.pcm.tempoTimeline[1].gb))
 assert(gb.extra.g4_2 and gb.extra.g4_2.pcm
   and #gb.extra.g4_2.pcm.events == 1,
   "GB side spec missing PCM refs")

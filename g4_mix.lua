@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v15"
+local CONVERTER_VERSION = "g4_v16"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -1146,7 +1146,12 @@ end
 -- without a resolved sample.
 local function pcmForTracks(tracks, voicegroups, generation)
   if generation < 1 or generation > 3 then return nil end
-  local events, timeline = {}, { { tick = 0, tempo = 240 } }
+  -- Chip tempo can only be an integer GB byte. Render PCM on that same grid
+  -- so long loops cannot drift against the beeps.
+  local function chipTempo(decoded)
+    return clamp(math.floor(38400 / math.max(1, decoded) + 0.5), 1, 0xFFFF)
+  end
+  local events, timeline = {}, { { tick = 0, tempo = 240, gb = chipTempo(240) } }
   local loopStartTick, loopEndTick, loopTick
   for _, track in ipairs(tracks or {}) do
     for _, event in ipairs(track.events or {}) do
@@ -1155,8 +1160,11 @@ local function pcmForTracks(tracks, voicegroups, generation)
           1, 0xFFFF)
         if event.tick == 0 then
           timeline[1].tempo = decoded
+          timeline[1].gb = chipTempo(decoded)
         else
-          timeline[#timeline + 1] = { tick = event.tick, tempo = decoded }
+          timeline[#timeline + 1] = {
+            tick = event.tick, tempo = decoded, gb = chipTempo(decoded),
+          }
         end
       elseif event.kind == "note" then
         local tone = voicegroups and voicegroups[1] and voicegroups[1][event.voice]

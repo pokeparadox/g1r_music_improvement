@@ -136,8 +136,16 @@ return function()
       local nextTick = timeline[i + 1] and timeline[i + 1].tick or tick
       local untilTick = math.min(tick, nextTick)
       if untilTick > done then
-        samples = samples + (untilTick - done) * SAMPLE_RATE * 2.5
-          / math.max(1, current.tempo or 300)
+        -- G4 PCM carries gb, the integer tempo byte actually used by the
+        -- chip channel. Render on that grid or long tracks drift against the
+        -- beeps. G3 scores have no gb and keep the exact score rate.
+        if tonumber(current.gb) then
+          samples = samples + (untilTick - done) * SAMPLE_RATE
+            * math.max(1, current.gb) / 15360
+        else
+          samples = samples + (untilTick - done) * SAMPLE_RATE * 2.5
+            / math.max(1, current.tempo or 300)
+        end
         done = untilTick
       end
       if done >= tick then break end

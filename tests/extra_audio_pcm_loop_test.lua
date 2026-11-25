@@ -102,5 +102,18 @@ do
     "score loop must resume at firstLoopEvent: " .. tostring(built.nextEvent))
 end
 
+do
+  local ticks = 3456
+  local gbExpected = math.floor(ticks * 44100 * 148 / 15360 + 0.5)
+  check(internals.pcmTickToSample({
+    { tick = 0, tempo = 260, gb = 148 },
+  }, ticks) == gbExpected, "G4 PCM must follow chip tempo byte")
+  local legacyExpected = math.floor(ticks * 44100 * 2.5 / 260 + 0.5)
+  check(internals.pcmTickToSample({
+    { tick = 0, tempo = 260 },
+  }, ticks) == legacyExpected, "G3 PCM must keep exact score rate")
+  check(gbExpected ~= legacyExpected, "tempo drift fixture too short")
+end
+
 package.loaded["src.core.ChipSynth"] = previousSynth
 print("extra_audio_pcm_loop_test: ok")

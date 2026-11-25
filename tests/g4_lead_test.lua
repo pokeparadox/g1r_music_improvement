@@ -74,7 +74,7 @@ assert(g4Mix.install({ g3Mix = g3Mix, nds = nds, songMap = songMap,
 
 local gold, err = g4Mix.convert("gold", "Music_G4LeadTest")
 assert(gold, err)
-assert(gold.def.converter == "g4_v15",
+assert(gold.def.converter == "g4_v16",
   "converter version must change for gen2 lead fallback: "
     .. tostring(gold.def.converter))
 assert(captured.voicegroups[1][1].leadDuty == 2,
