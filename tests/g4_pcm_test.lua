@@ -23,6 +23,27 @@ local secondOffset = firstOffset + #events
 local blob = string.char(0xFE, 0x03, 0x00, 0x93, 0x00) .. u24le(firstOffset)
   .. string.char(0x93, 0x01) .. u24le(secondOffset) .. events .. events2
 
+local voiceEvents = string.char(
+  0xE1, 120, 0x00,
+  0x81, 0x00, 0x3C, 100, 12,
+  0x81, 0x01, 0x40, 100, 12,
+  0xFF
+)
+local voiceOffset = 8
+local voiceBlob = string.char(0xFE, 0x03, 0x00, 0x93, 0x00)
+  .. u24le(voiceOffset) .. voiceEvents
+
+local splitEvents = string.char(
+  0xE1, 120, 0x00,
+  0x81, 0x00,
+  0x30, 100, 12,
+  0x3C, 100, 12,
+  0xFF
+)
+local splitOffset = 8
+local splitBlob = string.char(0xFE, 0x03, 0x00, 0x93, 0x00)
+  .. u24le(splitOffset) .. splitEvents
+
 local sampleBytes = {}
 for _ = 1, 64 do
   sampleBytes[#sampleBytes + 1] = string.char(0x40, 0x4E)
@@ -40,28 +61,65 @@ function g3Mix.buildSpecs(song, voicegroups, info)
 end
 
 local nds = {}
-function nds.status() return { available = true, songCount = 1 } end
+function nds.status() return { available = true, songCount = 3 } end
 function nds.listSongs()
-  return { { name = "SEQ_GS_TEST", index = 1, bank = 0, player = 0 } }
+  return {
+    { name = "SEQ_GS_TEST", index = 1, bank = 0, player = 0 },
+    { name = "SEQ_GS_VOICES", index = 2, bank = 1, player = 0 },
+    { name = "SEQ_GS_SPLIT", index = 3, bank = 2, player = 0 },
+  }
 end
-function nds.readSequence()
+function nds.readSequence(song)
+  if song.name == "SEQ_GS_VOICES" then
+    return { data = voiceBlob, base = 0, size = #voiceBlob }
+  elseif song.name == "SEQ_GS_SPLIT" then
+    return { data = splitBlob, base = 0, size = #splitBlob }
+  end
   return { data = blob, base = 0, size = #blob }
 end
-function nds.readBank()
+function nds.readBank(bank)
+  if bank == 1 then
+    return { count = 2, instruments = {
+      [1] = { type = 1, defs = {
+        [0] = { type = 1, waveID_dutyCycle = 0, waveArchiveID = 0,
+          pitch = 60, attack = 100, decay = 100, sustain = 100, release = 80 },
+      } },
+      [2] = { type = 2, defs = {
+        [0] = { type = 2, waveID_dutyCycle = 2, waveArchiveID = 0,
+          pitch = 60, attack = 100, decay = 100, sustain = 100, release = 80 },
+      } },
+    } }
+  elseif bank == 2 then
+    return { count = 1, instruments = { [1] = { type = 16, defs = {
+      [48] = { type = 1, keyLow = 48, keyHigh = 48, waveID_dutyCycle = 0,
+        waveArchiveID = 0, pitch = 48, attack = 100, decay = 100,
+        sustain = 100, release = 80 },
+      [60] = { type = 2, keyLow = 60, keyHigh = 60, waveID_dutyCycle = 2,
+        waveArchiveID = 0, pitch = 60, attack = 100, decay = 100,
+        sustain = 100, release = 80 },
+    } } } }
+  end
   return { count = 1, instruments = { [0] = { type = 1, defs = {
     [0] = { type = 1, waveID_dutyCycle = 0, waveArchiveID = 0,
       pitch = 60, attack = 100, decay = 100, sustain = 100, release = 80 },
   } } } }
 end
 function nds.readSample(bank, def)
-  assert(bank == 0 and def.waveID_dutyCycle == 0)
+  assert((bank == 0 or bank == 1 or bank == 2) and def.waveID_dutyCycle == 0)
   return { data = sampleData, sampleRate = 32768,
     loop = true, loopStart = 0, loopEnd = 63 }
 end
 
 local songMap = {
-  BY_NAME = { SEQ_GS_TEST = "Music_PalletTown" },
-  BY_KEY = { Music_PalletTown = { "SEQ_GS_TEST" } },
+  BY_NAME = {
+    SEQ_GS_TEST = "Music_PalletTown", SEQ_GS_VOICES = "Music_Voices",
+    SEQ_GS_SPLIT = "Music_SplitBank",
+  },
+  BY_KEY = {
+    Music_PalletTown = { "SEQ_GS_TEST" },
+    Music_Voices = { "SEQ_GS_VOICES" },
+    Music_SplitBank = { "SEQ_GS_SPLIT" },
+  },
 }
 function songMap.keyFor(name) return songMap.BY_NAME[name] end
 function songMap.namesFor(key) return songMap.BY_KEY[key] or {} end
@@ -98,7 +156,7 @@ assert(converted.def.pcm.loopStartTick == 0
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v17_hybrid",
+assert(gb.def.converter == "g4_v23_hybrid",
   "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
@@ -114,10 +172,6 @@ assert(hasNote(calls[1].song.trackData[1]),
 assert(not hasNote(calls[2].song.trackData[1]),
   "GB side note must be muted when PCM renders it")
 
-local function hasNote(bytes)
-  return type(bytes) == "string" and bytes:find(string.char(0xCF), 1, true) ~= nil
-end
-
 local function capture(convertMode)
   calls = {}
   local converted = assert(g4Mix.convert("firered", "MUS_PALLET", convertMode))
@@ -128,7 +182,7 @@ do
   local pcmOnly, pcmCalls = capture("pcm")
   assert(pcmOnly.def.g4Mix == true and pcmOnly.def.g4Gb == false,
     "G4 Mix must be PCM-only")
-  assert(pcmOnly.def.converter == "g4_v17_pcm", "G4 Mix converter suffix")
+  assert(pcmOnly.def.converter == "g4_v23_pcm", "G4 Mix converter suffix")
   assert(pcmOnly.def.pcm and #pcmOnly.def.pcm.events == 1,
     "G4 Mix must keep PCM events")
   for _, call in ipairs(pcmCalls) do
@@ -140,14 +194,49 @@ end
 do
   local chipOnly, chipCalls = capture("chip")
   assert(chipOnly.def.g4Gb == true and chipOnly.def.g4Mix == false,
-    "G4 GB must be chip-only")
-  assert(chipOnly.def.converter == "g4_v17_chip", "G4 GB converter suffix")
-  assert(chipOnly.def.pcm == nil, "G4 GB must drop PCM")
+    "G4 GB stays a separate variant")
+  assert(chipOnly.def.converter == "g4_v23_chip", "G4 GB converter suffix")
+  assert(chipOnly.def.pcm and #chipOnly.def.pcm.events == 1,
+    "G4 GB keeps PCM refs for sampled voices")
   assert(#chipCalls >= 2, "G4 GB must keep every decoded track")
   for _, call in ipairs(chipCalls) do
-    assert(hasNote(call.song.trackData[1]),
-      "G4 GB must keep chip notes on all tracks")
+    assert(not hasNote(call.song.trackData[1]),
+      "G4 GB mutes chip notes replaced by PCM")
   end
+end
+
+do
+  calls = {}
+  local split = assert(g4Mix.convert("gold", "Music_Voices", "chip"))
+  assert(#calls == 2, "G4 GB splits one SSEQ track by instrument: "
+    .. tostring(#calls))
+  local noteStreams = 0
+  for _, call in ipairs(calls) do
+    if hasNote(call.song.trackData[1]) then noteStreams = noteStreams + 1 end
+  end
+  assert(noteStreams == 1, "only PSG voice keeps a GB note stream")
+  assert(split.def.pcm and #split.def.pcm.events == 1,
+    "G4 GB keeps PCM refs for sampled voices")
+  assert(split.extra.g4_2 ~= nil, "fan-out reaches extra audio specs")
+  assert(split.extra.g4_2.pcm == nil, "G4 GB PSG voice has no PCM")
+  for _, spec in ipairs({ split.def, split.extra.g4_2 }) do
+    assert(spec.g4Gb == true and spec.g4Mix == false, "fan-out stays GB-only")
+  end
+end
+
+do
+  calls = {}
+  local splitBank = assert(g4Mix.convert("gold", "Music_SplitBank", "chip"))
+  assert(#calls == 2, "SBNK type-16 split bank splits by note definition: "
+    .. tostring(#calls))
+  local noteStreams = 0
+  for _, call in ipairs(calls) do
+    if hasNote(call.song.trackData[1]) then noteStreams = noteStreams + 1 end
+  end
+  assert(noteStreams == 1, "split bank only PSG note keeps GB stream")
+  assert(splitBank.def.pcm and #splitBank.def.pcm.events == 1,
+    "split bank sampled note keeps PCM")
+  assert(splitBank.extra.g4_2.pcm == nil, "split bank PSG note has no PCM")
 end
 
 print("g4_pcm_test: ok")

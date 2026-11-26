@@ -923,7 +923,7 @@ T.eq(type(mainSource) == "string"
   true, "Gen3 enhance prompt is gated on the field phase")
 T.eq(type(mainSource) == "string"
   and mainSource:find("elseif generation == hostGeneration then", 1, true) ~= nil
-  and mainSource:find("g4Mix.has(entry.id, candidateLabel)", 1, true) ~= nil,
+  and mainSource:find("g4Mix.has(entry.id, candidateLabel, \"pcm\")", 1, true) ~= nil,
   true, "G4 candidates enumerate host generation (Gold gets G2 variants)")
 T.eq(type(mainSource) == "string"
   and mainSource:find(

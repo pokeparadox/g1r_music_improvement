@@ -1316,14 +1316,15 @@ return function(mod)
         or (versions.BY_ID[entry.id] and versions.BY_ID[entry.id].generation)
       if generation == 3 then
         for _, candidateLabel in ipairs(versions.mixLabelsFor(key, entry.id)) do
-          if g3Mix.has(entry.id, candidateLabel) and g4Mix.has(entry.id, candidateLabel) then
+          if g3Mix.has(entry.id, candidateLabel)
+              and g4Mix.has(entry.id, candidateLabel, "pcm") then
             add(entry.id, 3, candidateLabel)
             break
           end
         end
       elseif generation == hostGeneration then
         local candidateLabel = group and group["gen" .. generation]
-        if candidateLabel and g4Mix.has(entry.id, candidateLabel) then
+        if candidateLabel and g4Mix.has(entry.id, candidateLabel, "pcm") then
           add(entry.id, generation, candidateLabel)
         end
       end

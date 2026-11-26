@@ -693,7 +693,7 @@ return function()
 
   local function setProfile(profile)
     state.profile = profile == "gba" and "gba" or "gb"
-    state.maxEngines = state.profile == "gba" and 16 or nil
+    state.maxEngines = nil
   end
 
   local function setSampleReader(fn)

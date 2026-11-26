@@ -223,8 +223,8 @@ check(sources[#sources] ~= stalledSource, "underrun rebuilds the harmony source"
 audio.stop()
 baseSource.playing = true
 
--- GBA G4 Mix songs can carry many side engines. The GBA profile caps
--- concurrent engines so ungrouped tracks never overload the mixer.
+-- GBA G4 Mix songs can carry many side engines. Every side song gets its
+-- own engine; the GBA profile no longer truncates the fan-out.
 now = 800
 baseSource.playing = true
 local gbaAudio = newAudio()
@@ -235,8 +235,8 @@ for slot = 1, 20 do
   gbaSong[slot] = { chip = {} }
 end
 gbaAudio.start(gbaSong, {}, now, true)
-eq(#synth.engines - beforeGbaEngines, 16,
-  "GBA profile caps side engines at 16 slots")
+eq(#synth.engines - beforeGbaEngines, 20,
+  "GBA profile keeps every side engine")
 gbaAudio.stop()
 
 -- Direct PCM voices resolve SWAV samples through the reader supplied by
