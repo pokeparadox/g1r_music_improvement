@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v16"
+local CONVERTER_VERSION = "g4_v17"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -886,7 +886,7 @@ local function decodeTrack(seq, start, voices, songBank)
   }
 end
 
-local function synthTrack(decoded, perNoteState, mutePcm)
+local function synthTrack(decoded, perNoteState, mutePcm, muteAll)
   local out, current, lastVoice = {}, 0, nil
   local loopTarget
   local function emit(event)
@@ -927,7 +927,7 @@ local function synthTrack(decoded, perNoteState, mutePcm)
     elseif kind == "note" then
       -- On GB hosts PCM voices are rendered by extra_audio; muting the
       -- matching GB note avoids doubling while waits keep exact timing.
-      if not (mutePcm and event.hasPcm) then
+      if not (muteAll or (mutePcm and event.hasPcm)) then
         if perNoteState then
           -- Premixed tracks carry notes from several SSEQ tracks; state must be
           -- restated per note or one track's instrument/pan leaks into another.
@@ -1199,7 +1199,8 @@ local function pcmForTracks(tracks, voicegroups, generation)
   }
 end
 
-function M.convert(version, label)
+function M.convert(version, label, mode)
+  mode = mode == "chip" and "chip" or mode == "pcm" and "pcm" or "hybrid"
   if not M.available() then return setError(M.lastError or "NDS import unavailable") end
   local song = mappedSongFor(label)
   if not song then return setError("no imported SSEQ for " .. tostring(label)) end
@@ -1231,11 +1232,15 @@ function M.convert(version, label)
   local specs, specTracks, specPcms = {}, {}, {}
   local premixed = sourceTracks > songDef.tracks
   for trackIndex, trackBytes in ipairs(songDef.trackData) do
-    local pcm = pcmForTracks({ groupedTracks[trackIndex] }, voicegroups, generation)
+    local pcm = mode ~= "chip"
+      and pcmForTracks({ groupedTracks[trackIndex] }, voicegroups, generation)
+      or nil
     specPcms[trackIndex] = pcm
-    -- Base spec stays chip-only (base source has no PCM path). Side specs on
-    -- GB hosts mute notes backed by PCM so extra_audio does not double voices.
-    if pcm and generation < 3 and trackIndex > 1 then
+    -- G4 Mix is PCM-only; G4 GB keeps every chip note and drops PCM refs.
+    -- The legacy hybrid still mutes GB notes backed by PCM to avoid doubling.
+    if mode == "pcm" then
+      trackBytes = synthTrack(groupedTracks[trackIndex], premixed, false, true)
+    elseif pcm and generation < 3 and trackIndex > 1 then
       trackBytes = synthTrack(groupedTracks[trackIndex], premixed, true)
     end
     local perTrackSong = {
@@ -1256,8 +1261,9 @@ function M.convert(version, label)
   end
   local def = specs[1]
   def.generation = generation
-  def.g4Mix = true
-  def.converter = CONVERTER_VERSION
+  def.g4Mix = mode ~= "chip"
+  def.g4Gb = mode == "chip"
+  def.converter = CONVERTER_VERSION .. "_" .. mode
   if sourceTracks > songDef.tracks then
     def.premix = true
     def.sourceTracks = sourceTracks
@@ -1267,8 +1273,9 @@ function M.convert(version, label)
     spec.pcm = specPcms[i]
     if i > 1 then
       spec.generation = generation
-      spec.g4Mix = true
-      spec.converter = CONVERTER_VERSION
+      spec.g4Mix = mode ~= "chip"
+      spec.g4Gb = mode == "chip"
+      spec.converter = def.converter
       spec.premix = def.premix or nil
       extra["g4_" .. i] = spec
     end

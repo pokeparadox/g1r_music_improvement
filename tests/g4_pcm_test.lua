@@ -98,7 +98,8 @@ assert(converted.def.pcm.loopStartTick == 0
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v16", "converter version must bump for PCM")
+assert(gb.def.converter == "g4_v17_hybrid",
+  "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
 assert(gb.def.pcm.tempoTimeline[1].tempo == 240
@@ -112,5 +113,41 @@ assert(hasNote(calls[1].song.trackData[1]),
   "base GB spec must keep its chip note")
 assert(not hasNote(calls[2].song.trackData[1]),
   "GB side note must be muted when PCM renders it")
+
+local function hasNote(bytes)
+  return type(bytes) == "string" and bytes:find(string.char(0xCF), 1, true) ~= nil
+end
+
+local function capture(convertMode)
+  calls = {}
+  local converted = assert(g4Mix.convert("firered", "MUS_PALLET", convertMode))
+  return converted, calls
+end
+
+do
+  local pcmOnly, pcmCalls = capture("pcm")
+  assert(pcmOnly.def.g4Mix == true and pcmOnly.def.g4Gb == false,
+    "G4 Mix must be PCM-only")
+  assert(pcmOnly.def.converter == "g4_v17_pcm", "G4 Mix converter suffix")
+  assert(pcmOnly.def.pcm and #pcmOnly.def.pcm.events == 1,
+    "G4 Mix must keep PCM events")
+  for _, call in ipairs(pcmCalls) do
+    assert(not hasNote(call.song.trackData[1]),
+      "G4 Mix must mute every chip note")
+  end
+end
+
+do
+  local chipOnly, chipCalls = capture("chip")
+  assert(chipOnly.def.g4Gb == true and chipOnly.def.g4Mix == false,
+    "G4 GB must be chip-only")
+  assert(chipOnly.def.converter == "g4_v17_chip", "G4 GB converter suffix")
+  assert(chipOnly.def.pcm == nil, "G4 GB must drop PCM")
+  assert(#chipCalls >= 2, "G4 GB must keep every decoded track")
+  for _, call in ipairs(chipCalls) do
+    assert(hasNote(call.song.trackData[1]),
+      "G4 GB must keep chip notes on all tracks")
+  end
+end
 
 print("g4_pcm_test: ok")

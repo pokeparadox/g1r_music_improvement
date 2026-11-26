@@ -800,15 +800,17 @@ T.eq(type(sourceScreen and sourceScreen.new), "function",
   "source screen is registered")
 local sourceMenu = sourceScreen.new(run.data)
 T.eq(sourceMenu.rows, 5, "source menu leaves room for the footer")
-local sourceLabels = { "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G4 MIX", "G3" }
+local sourceLabels = {
+  "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G4 MIX", "G4 GB", "G3",
+}
 for index, label in ipairs(sourceLabels) do
   T.eq(sourceMenu.items[index] and sourceMenu.items[index].label, label,
     "source toggle " .. index .. " is " .. label)
 end
-T.eq(sourceMenu.items[8].right, "N/A",
+T.eq(sourceMenu.items[9].right, "N/A",
   "native G3 is unavailable outside GBA hosts")
 local gbaSourceMenu = sourceScreen.new({ save = { version = "firered" } })
-T.eq(gbaSourceMenu.items[8].right, "YES",
+T.eq(gbaSourceMenu.items[9].right, "YES",
   "native G3 is enabled on GBA hosts")
 
 if cache and exports and type(cache.delete) == "function" then
