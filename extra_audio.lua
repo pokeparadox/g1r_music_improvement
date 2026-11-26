@@ -119,6 +119,10 @@ return function()
   -- ChipSynth advances 0.4 * M4A tempo seq ticks per second; convert those
   -- ticks to output samples so PCM voices stay locked to chip events.
   local MAX_PCM_VOICES = 16
+  -- PCM is rendered on the same bus as the extra chip voices; full-level GBA
+  -- samples mask the chip layer. Keep samples under the chip by default.
+  -- ponytail: fixed ceiling, add a profile knob only if FR sample level needs tuning.
+  local PCM_GAIN = 0.6
 
   local function pcmSample(data, frame)
     local index = frame * 2 + 1
@@ -173,6 +177,11 @@ return function()
     end
   end
 
+  local function chipGainFor(songGain, gain, hasPcm)
+    if not hasPcm then return gain end
+    return math.min(1, gain * math.max(1, 0.8 / math.max(0.01, songGain)))
+  end
+
   local function pcmPrepare(side, sideSong)
     local pcm = sideSong.pcm
     if type(pcm) ~= "table" or type(pcm.events) ~= "table" or #pcm.events == 0
@@ -186,13 +195,18 @@ return function()
     end
     local events, samples = {}, {}
     for _, event in ipairs(pcm.events) do
-      local key = tostring(event.bank) .. ":" .. tostring(event.archive) .. ":"
-        .. tostring(event.wave)
+      local gba = type(event.bank) == "table" and event.bank.gba
+      local key = gba
+        and ("gba:" .. tostring(event.bank.version) .. ":"
+          .. tostring(event.bank.sampleId))
+        or (tostring(event.bank) .. ":" .. tostring(event.archive) .. ":"
+          .. tostring(event.wave))
       local sample = samples[key]
       if sample == nil then
-        local ok, resolved = pcall(state.sampleReader, event.bank, {
+        local readerDef = gba and event.bank or {
           waveArchiveID = event.archive, waveID_dutyCycle = event.wave,
-        })
+        }
+        local ok, resolved = pcall(state.sampleReader, event.bank, readerDef)
         if ok and type(resolved) == "table" and type(resolved.data) == "string"
             and #resolved.data >= 4 then
           sample = resolved
@@ -207,6 +221,8 @@ return function()
         events[#events + 1] = {
           at = at, gateSamples = math.max(1, gateEnd - at),
           key = tonumber(event.key) or 60, pitch = tonumber(event.pitch) or 60,
+          rateHz = tonumber(event.rateHz),
+          gainScale = math.max(0.1, tonumber(event.gainScale) or 1),
           vel = math.max(1, math.min(127, tonumber(event.vel) or 100)),
           volume = math.max(1, math.min(127, tonumber(event.volume) or 100)),
           pan = tonumber(event.pan) or 0x40,
@@ -265,8 +281,9 @@ return function()
         if loopStart > frames - 1 then loopStart = frames - 1 end
         local hasLoop = event.sample.loop and loopEnd > loopStart
         if not hasLoop then loopStart = 0 end
-        local ratio = rate / SAMPLE_RATE
-          * 2 ^ ((event.key - event.pitch) / 12)
+        local ratio = event.rateHz and event.rateHz > 0
+          and event.rateHz / SAMPLE_RATE
+          or (rate / SAMPLE_RATE * 2 ^ ((event.key - event.pitch) / 12))
         local pan = math.max(-1, math.min(1, (event.pan - 0x40) / 0x80))
         pcm.active[#pcm.active + 1] = {
           data = data, phase = 0, loopStart = loopStart,
@@ -275,7 +292,8 @@ return function()
           step = ratio, start = at,
           stop = at + event.gateSamples + math.floor(SAMPLE_RATE * 0.08),
           gateEnd = at + event.gateSamples,
-          gain = baseGain * math.sqrt((event.vel / 127) * (event.volume / 127)),
+          gain = baseGain * PCM_GAIN * event.gainScale
+            * math.sqrt((event.vel / 127) * (event.volume / 127)),
           leftGain = 0.5 + 0.25 * (1 - pan),
           rightGain = 0.5 + 0.25 * (1 + pan),
         }
@@ -415,8 +433,14 @@ return function()
       local rightGain = 0.5 + 0.25 * (1 + pan)
       local songGain = state.gains[side] or 1
       local gain = state.extraGain * state.musicVolume * dynGain * songGain
-      local okSd, sd = engine and pcall(ChipSynth.soundData, engine, chunk, 1)
-        or false, nil
+      -- Converter balance can push a PCM carrier's chip side down to gain
+      -- 0.35.  Samples share this bus; keep the chip layer audible instead of
+      -- letting DirectSound bury it.
+      local chipGain = chipGainFor(songGain, gain, state.pcms[side] ~= nil)
+      local okSd, sd = false, nil
+      if engine then
+        okSd, sd = pcall(ChipSynth.soundData, engine, chunk, 1)
+      end
       if okSd and sd and dynGain > 0 then
         local ptr = nil
         if ChipSynth._int16Pointer then
@@ -431,8 +455,8 @@ return function()
             local okSample, v = pcall(sd.getSample, sd, i)
             if okSample then sample = v or 0 end
           end
-          leftMix[i] = leftMix[i] + sample * gain * leftGain
-          rightMix[i] = rightMix[i] + sample * gain * rightGain
+          leftMix[i] = leftMix[i] + sample * chipGain * leftGain
+          rightMix[i] = rightMix[i] + sample * chipGain * rightGain
         end
       end
       local pcm = state.pcms[side]

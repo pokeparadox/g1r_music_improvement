@@ -23,7 +23,7 @@ function synth.newEngine()
 end
 function synth.soundData(engine, samples)
   engine.samples = engine.samples + samples
-  return { getSample = function() return 0 end }
+  return { getSample = function() return 0.25 end }
 end
 function synth.newBuffer(samples, channels)
   local buffer = {
@@ -31,7 +31,9 @@ function synth.newBuffer(samples, channels)
     channels = channels,
     data = {},
   }
-  function buffer:setSample(index, value) self.data[index] = value end
+  function buffer:setSample(index, channel, value)
+    self.data[index] = value or channel
+  end
   synth.buffers[#synth.buffers + 1] = buffer
   return buffer
 end
@@ -101,6 +103,18 @@ local preparedSource = sources[#sources]
 eq(preparedEngine.samples, 8192, "prepared harmony renders its lead before base starts")
 eq(preparedSource.queued, 16, "prepared harmony queues the full lead")
 eq(preparedSource.playing, false, "prepared harmony waits for the base")
+do
+  -- Regression: `engine and pcall(...)` truncates pcall returns, dropping
+  -- chip SoundData so only PCM renders. Buffers must contain chip samples.
+  local data = synth.buffers[#synth.buffers].data
+  local nonzero = false
+  if data then
+    for _, value in pairs(data) do
+      if value ~= 0 then nonzero = true break end
+    end
+  end
+  check(nonzero, "chip SoundData samples missing from harmony buffer")
+end
 baseSource.playing = true
 now = 91
 preparedAudio.update()

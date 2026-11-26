@@ -87,6 +87,23 @@ for _, ev in ipairs(repeatTrack.events) do
 end
 assert(repeatNotes == 1, "REPEAT count+addr consumes exactly its operands")
 
+-- Bend/TUNE are fractional semitones in m4a; 0xEE fine is folded into the
+-- same 0..255 field by Seq.trackPitch.  Old converter treated bend as whole
+-- keys and TUNE as /8 semitones, making Bicycle lead pitch far too high.
+local pitchTrack = mix.decodeTrack(string.char(
+  0xBD, 0x01,
+  0xBC, 0x02, 0xC0, 0x50, 0xC1, 0x03, 0xC8, 0x48, 0xEE, 0x02,
+  0xD3, 60, 100,
+  0xB1
+))
+local pitchNote
+for _, event in ipairs(pitchTrack.events) do
+  if event.kind == "note" then pitchNote = event break end
+end
+assert(pitchNote, "pitch state emitted no note")
+eq(pitchNote.key, 62, "engine-equivalent bent note key")
+eq(pitchNote.fine, 226, "engine-equivalent bent note fine")
+
 -- Real FRLG tracks use LFO/mod commands and running-status notes.  Stopping on
 -- 0xC2 or on a bare key byte made every converted song silent.
 local stream = mix.decodeTrack(string.char(
@@ -283,7 +300,7 @@ local bendTrack = string.char(
   0xBD, 0x01,
   0xD3, 60, 100,
   0x82,
-  0xC0, 0x42,
+  0xC0, 0x80,
   0xB1
 )
 local bendSpec = mix.buildSpecs({
@@ -306,7 +323,7 @@ local splitTrack = string.char(
   0xBD, 0x01,
   0xCF, 60, 100, 60,
   0xA0,
-  0xC0, 0x42,
+  0xC0, 0x80,
   0xB1
 )
 local splitSpec = mix.buildSpecs({

@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 5
+local CONVERTER_VERSION = 8
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -26,6 +26,57 @@ function M.clockAt(index)
   index = tonumber(index) or 0
   if index < 0 then index = 0 end
   return CLOCK[index] or index
+end
+
+-- DirectSample pitch tables from m4a_mix.lua. WaveData.freq is Q10: at key 60
+-- midiKeyToFreq(freq, 60, 0) returns freq/1024, the sample playback Hz.
+local DS_SCALE = {
+  [0]=0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,
+  0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,
+  0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xCB,
+  0xB0,0xB1,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xBB,
+  0xA0,0xA1,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xAB,
+  0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,
+  0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x8B,
+  0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B,
+  0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B,
+  0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,
+  0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x4B,
+  0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x3B,
+  0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2A,0x2B,
+  0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,
+  0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,
+}
+local DS_FREQ = {
+  [0]=2147483648, 2275179671, 2410468894, 2553802834,
+  2705659852, 2866546760, 3037000500, 3217589947,
+  3408917802, 3611622603, 3826380858, 4053909305,
+}
+local GBA_MIX_RATE = 16777216 / 280896 * 224
+
+local function umulHi32(a, b)
+  return math.floor(a * b / 4294967296)
+end
+
+local function dsScaleFreq(key)
+  key = math.floor(tonumber(key) or 60)
+  if key < 0 then key = 0 end
+  if key > 179 then key = 179 end
+  local s = DS_SCALE[key] or 0
+  return math.floor((DS_FREQ[s % 16] or 0) / (2 ^ math.floor(s / 16)))
+end
+
+local function midiKeyToFreq(wavFreq, key, fine)
+  wavFreq = tonumber(wavFreq) or 0
+  key = math.floor(tonumber(key) or 60)
+  fine = math.floor(tonumber(fine) or 0)
+  if fine < 0 then fine = 0 end
+  if fine > 255 then fine = 255 end
+  if key > 178 then key, fine = 178, 255 end
+  if key < 0 then key = 0 end
+  local val1 = dsScaleFreq(key)
+  local val2 = dsScaleFreq(key + 1)
+  return umulHi32(wavFreq, val1 + umulHi32(val2 - val1, fine * 16777216))
 end
 
 -- Local copy of the engine's M4A header parser. Engine game3 modules are
@@ -110,6 +161,7 @@ function M.decodeTrack(data)
   local key, vel, voice = 60, 100, 0
   local volume, pan, tempo = 100, 0x40, 150
   local keyShift, bend, bendRange = 0, 0, 2
+  local tune, fineTuning = 0, 0
   local repeats, jumps, callStack, mem = {}, 0, {}, {}
   local toneOverrides
   local runningStatus
@@ -118,8 +170,16 @@ function M.decodeTrack(data)
   local tickAt = {}
   local loopSeq, loopTick, sequence = nil, nil, 0
   local add
+  -- Mirror Seq.trackPitch: bend/tune are fractional semitones, not whole keys.
+  -- Fine tuning from 0xEE is folded into the same 0..255 fine field.
+  local function trackPitch()
+    local x = (tune + bend * bendRange) * 4 + keyShift * 256
+    local fine = x % 256 + fineTuning % 256
+    return math.floor(x / 256) + math.floor(fine / 256), fine % 256
+  end
+
   local function currentPitch()
-    return key + keyShift + bend * bendRange
+    return key + trackPitch()
   end
   local lastPitch
   local function emitPitch()
@@ -259,9 +319,7 @@ function M.decodeTrack(data)
       elseif cmd >= 0xC2 and cmd <= 0xC5 then
         read() -- LFO speed/delay, modulation depth/type
       elseif cmd == 0xC8 then
-        -- TUNE is centred on 0x40; approximation folds it into semitones.
-        local tune = (read() or 0x40) - 0x40
-        keyShift = keyShift + math.floor(tune / 8)
+        tune = (read() or 0x40) - 0x40
         emitPitch()
       elseif cmd == 0xCD then
         local xop = read() or 0
@@ -286,6 +344,11 @@ function M.decodeTrack(data)
           -- Engine terminates the track on unknown XRMI commands.
           break
         end
+      elseif cmd == 0xEE then
+        local fine = read() or 0
+        fineTuning = fine > 127 and fine - 256 or fine
+      elseif cmd == 0xEF then
+        fineTuning = 0
       elseif cmd == 0xCE then
         -- ENDTIE releases the current (or explicitly named) key.  Without an
         -- off event tied notes sustain until the next note or song end.
@@ -328,6 +391,7 @@ function M.decodeTrack(data)
               existing.volume = math.floor((existing.volume or 100) * 0.8)
             end
           else
+            local _, pitchFine = trackPitch()
             local event = add("note", {
               key = pitch,
               rawKey = key,
@@ -337,6 +401,7 @@ function M.decodeTrack(data)
               volume = volume,
               pan = pan,
               tempo = tempo,
+              fine = pitchFine,
               toneOverrides = toneOverrides and copyTable(toneOverrides) or nil,
             })
             noteSeen[slot] = event
@@ -478,7 +543,7 @@ local function resolveTone(voicegroups, vgId, voiceId, rawKey, depth)
   return tone
 end
 
-local function toneInfo(voicegroups, vgId, note, specWaves)
+local function toneInfo(voicegroups, vgId, note, specWaves, samples, version)
   local tone = resolveTone(voicegroups, vgId, note.voice, note.rawKey)
   if tone and tone.isRhy then
     local preset = drumPresetFor(note.rawKey or note.key)
@@ -489,6 +554,30 @@ local function toneInfo(voicegroups, vgId, note, specWaves)
   end
   local typ = tone and tone.type or 0
   local kind = typ % 8
+  if kind == 0 and tone and tone.sampleId and samples then
+    local meta = tableValue(samples, tone.sampleId)
+    if meta and tonumber(meta.offset) and tonumber(meta.size) then
+      local fixed = math.floor(typ / 8) % 2 == 1
+      local noteKey = tone.isRhy and tonumber(tone.key)
+        or (tonumber(note.key) or tonumber(note.rawKey) or 60)
+      noteKey = math.max(0, math.min(178, math.floor(noteKey or 60)))
+      local rateHz = fixed and GBA_MIX_RATE
+        or midiKeyToFreq(meta.freq, noteKey, note.fine or 0)
+      if rateHz >= 1000 then
+        local pcmTone = copyTable(tone)
+        pcmTone.pcm = {
+          version = version, sampleId = tone.sampleId,
+          offset = tonumber(meta.offset) or 0,
+          size = math.max(0, math.floor(tonumber(meta.size) or 0)),
+          freq = tonumber(meta.freq) or 0,
+          loopStart = math.floor(tonumber(meta.loopStart) or 0),
+          status = tonumber(meta.status) or 0,
+          rateHz = rateHz,
+        }
+        tone = pcmTone
+      end
+    end
+  end
   if kind < 1 or kind > 4 then kind = 1 end
   -- G4 Mix gen2 fallback: sustained sampled voices cannot sound like their
   -- source on the 32-step wave channel. A duty pulse plus the normal
@@ -739,6 +828,8 @@ end
 
 function M.buildSpecs(song, voicegroups, info)
   if type(song) ~= "table" or not song.tracks or song.tracks < 1 then return nil end
+  local samples = info and info.samples
+  local sampleVersion = info and info.version
   -- FRLG song blobs store a ROM pointer in `voicegroup`; the playable cache
   -- index carries the real voicegroup number.  Using the pointer misses every
   -- tone, collapsing all instruments to one duty and one envelope.
@@ -818,7 +909,8 @@ function M.buildSpecs(song, voicegroups, info)
     local keySum, keyCount = 0, 0
     for index, event in ipairs(track.events) do
       if event.kind == "note" then
-        local kind, duty, waveIndex, tone = toneInfo(voicegroups, vgId, event, specWaves)
+        local kind, duty, waveIndex, tone = toneInfo(voicegroups, vgId, event,
+          specWaves, samples, sampleVersion)
         local noteKey = tonumber(event.key) or 0
         if noteKey > 0 then
           keySum = keySum + noteKey
@@ -852,7 +944,7 @@ function M.buildSpecs(song, voicegroups, info)
         notes[#notes + 1] = {
           index = index, start = event.tick, gate = gate, kind = kind,
           duty = duty, waveIndex = waveIndex, gain = noteGain(event),
-          segments = segments,
+          tone = tone, segments = segments,
         }
         kinds[kind] = (kinds[kind] or 0) + 1
       end
@@ -867,6 +959,15 @@ function M.buildSpecs(song, voicegroups, info)
     }
   end
 
+  local pcmEvents = {}
+  local pcmTimeline = { { tick = 0, tempo = baseTempo, gb = gbTempo(baseTempo) } }
+  for _, entry in ipairs(tempoTimeline) do
+    if entry.tick > 0 then
+      pcmTimeline[#pcmTimeline + 1] = {
+        tick = entry.tick, tempo = entry.tempo, gb = gbTempo(entry.tempo),
+      }
+    end
+  end
   local specs = {}
   for start = 1, #decoded, 4 do
     local analyses, specWaves = {}, {}
@@ -906,10 +1007,29 @@ function M.buildSpecs(song, voicegroups, info)
     end
     for trackIndex, analysis in ipairs(analyses) do
       for _, note in ipairs(analysis.notes) do
-        actions[#actions + 1] = {
-          tick = note.start, all = false, trackIndex = trackIndex,
-          order = note.index, note = note,
-        }
+        local pcm = note.tone and note.tone.pcm
+        if pcm then
+          local segment = note.segments[1] or note
+          pcmEvents[#pcmEvents + 1] = {
+            tick = note.start, gate = note.gate,
+            key = tonumber(segment.key) or 60,
+            vel = tonumber(segment.vel) or 100,
+            volume = tonumber(segment.volume) or 100,
+            pan = tonumber(segment.pan) or 0x40,
+            bank = {
+              gba = true, version = pcm.version, sampleId = pcm.sampleId,
+              offset = pcm.offset, size = pcm.size, freq = pcm.freq,
+              loopStart = pcm.loopStart, status = pcm.status,
+            },
+            archive = pcm.sampleId, wave = 0, rateHz = pcm.rateHz,
+            gainScale = note.gainScale or segment.gainScale or 1,
+          }
+        else
+          actions[#actions + 1] = {
+            tick = note.start, all = false, trackIndex = trackIndex,
+            order = note.index, note = note,
+          }
+        end
       end
     end
     table.sort(actions, function(a, b)
@@ -1020,6 +1140,29 @@ function M.buildSpecs(song, voicegroups, info)
     spec.pan = specIndex == 1 and 0
       or (panCount > 0 and math.max(-1, math.min(1, panSum / panCount)) or 0)
   end
+  if #pcmEvents > 0 then
+    table.sort(pcmEvents, function(a, b) return a.tick < b.tick end)
+    local pcm = {
+      events = pcmEvents, tempoTimeline = pcmTimeline,
+      loopStartTick = 0, loopEndTick = globalLoopTick,
+      loopTick = globalLoopTick,
+    }
+    if specs[2] then
+      specs[2].pcm = pcm
+    else
+      -- Base song defs lose pcm during improve/ChipAsm, so a one-spec song
+      -- needs a silent extra carrier. ExtraAudio renders this side as samples.
+      local channels = {}
+      for hw = 1, 4 do
+        channels[#channels + 1] = { hw = hw,
+          program = { { rest = lastTick }, { loop = { count = 0, to = 1 } } } }
+      end
+      specs[#specs + 1] = {
+        tempo = gbTempo(baseTempo), channels = channels, waves = {},
+        drums = DRUMS, engine = 1, gain = 1, pan = 0, pcm = pcm,
+      }
+    end
+  end
   return specs
 end
 
@@ -1069,7 +1212,8 @@ local function dataFor(version)
   local index = luaTable(version, "index.lua")
   local voicegroups = luaTable(version, "voicegroups.lua")
   if not index or not voicegroups then cache[version] = false return nil end
-  local data = { index = index, voicegroups = voicegroups }
+  local samples = luaTable(version, "samples.lua")
+  local data = { index = index, voicegroups = voicegroups, samples = samples }
   cache[version] = data
   return data
 end
@@ -1139,7 +1283,16 @@ function M.has(version, label)
   return usableSong(info)
 end
 
-function M.convert(version, label)
+function M.readSampleBlob(version, offset, size)
+  offset = tonumber(offset) or 0
+  size = tonumber(size) or 0
+  if offset < 0 or size <= 0 then return nil end
+  local blob = audioFile(version, "samples.bin")
+  if type(blob) ~= "string" or offset >= #blob then return nil end
+  return blob:sub(offset + 1, math.min(#blob, offset + size))
+end
+
+function M.convert(version, label, opts)
   local function fail(reason)
     M.lastError = string.format("%s/%s: %s", tostring(version), tostring(label), reason)
     return nil
@@ -1155,7 +1308,12 @@ function M.convert(version, label)
   if type(blob) ~= "string" then return fail("missing song bin") end
   local okParse, song = pcall(parseSongBin, blob)
   if not okParse or type(song) ~= "table" then return fail("song parse failed") end
-  local specs = M.buildSpecs(song, data.voicegroups, info)
+  local buildInfo = {}
+  for key, value in pairs(info or {}) do buildInfo[key] = value end
+  buildInfo.samples = data.samples
+  buildInfo.version = version
+  buildInfo.generation = opts and opts.generation
+  local specs = M.buildSpecs(song, data.voicegroups, buildInfo)
   if not specs or #specs == 0 then return fail("no chip specs") end
   local def = specs[1]
   def.generation = 1

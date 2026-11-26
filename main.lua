@@ -95,7 +95,34 @@ return function(mod)
   local extraAudioFactory = loadModFile("extra_audio.lua")
   local extraAudio = extraAudioFactory and extraAudioFactory()
   local gbaExtraAudio = extraAudioFactory and extraAudioFactory()
+  local function readGbaSample(bank, def)
+    if not g3Mix or not g3Mix.readSampleBlob then return nil end
+    local source
+    if type(def) == "table" and def.gba then source = def
+    elseif type(bank) == "table" and bank.gba then source = bank end
+    if not source then return nil end
+    local blob = g3Mix.readSampleBlob(source.version, source.offset, source.size)
+    if type(blob) ~= "string" then return nil end
+    local pcm = {}
+    for i = 1, #blob do
+      local byte = blob:byte(i)
+      if byte >= 128 then byte = byte - 256 end
+      pcm[i] = string.char(byte % 256, byte >= 0 and 255 or 0)
+    end
+    local loopStart = tonumber(source.loopStart) or 0
+    local size = tonumber(source.size) or 0
+    local loop = math.floor((tonumber(source.status) or 0) / 16384) % 4 ~= 0
+      and loopStart < size
+    return { data = table.concat(pcm),
+      sampleRate = tonumber(source.freq) and math.floor(source.freq / 1024 + 0.5) or 44100,
+      loopStart = loopStart, loopEnd = size - 1, loop = loop }
+  end
   local function readNdsSample(bank, def)
+    if type(bank) == "table" and bank.gba or type(def) == "table" and def.gba then
+      local ok, sample = pcall(readGbaSample, bank, def)
+      if ok then return sample end
+      return nil
+    end
     if not ndsImport or not ndsImport.readSample then return nil end
     local ok, sample = pcall(ndsImport.readSample, bank, def)
     if ok then return sample end
@@ -1595,7 +1622,8 @@ return function(mod)
     local ss = { enabled = enabled }
     local translated
     if entry.mix then
-      local converted = g3Mix.convert(entry.version, entry.label)
+      local converted = g3Mix.convert(entry.version, entry.label,
+        { generation = hostGeneration() })
       if not converted then
         mod.log:warn("music_improvement: no G3 mix data for %s (%s)",
           tostring(entry.label), tostring(entry.version))
@@ -2542,7 +2570,11 @@ return function(mod)
   -- drains the harmony queue faster than it can be repaired. Stop the extra
   -- voices for this song instead of drifting; music.started retries them.
   local function frameGuard(dt)
-    if not extraAudio or not extraAudio.isActive() then return end
+    local targets = {}
+    for _, audio in ipairs({ extraAudio, gbaExtraAudio }) do
+      if audio and audio.isActive() then targets[#targets + 1] = audio end
+    end
+    if #targets == 0 then return end
     if type(dt) ~= "number" or dt <= 0 then return end
     local now = g1rClock()
     if now < guardIgnoreUntil then return end
@@ -2556,7 +2588,7 @@ return function(mod)
     if over and (dt > 0.5 or now - cpuOverSince >= 1.0) then
       suppressExtra = true
       cpuOverSince = nil
-      pcall(extraAudio.stop)
+      for _, audio in ipairs(targets) do pcall(audio.stop) end
       mod.log:info("music_improvement: harmony paused until next song (%.0fms frame)",
                    dt * 1000)
     end
@@ -2775,26 +2807,25 @@ return function(mod)
       frameGuard(dt)
       -- Base audio starts inside nextUpdate (Music.update -> ChipAudio.update).
       -- Start harmony after it, in the same frame, instead of one frame late.
-      if gbaExtraAudio and hostIsGen3(self) then
-        pcall(gbaExtraAudio.setExtraMix, mod.options:get("extra_mix"))
-      end
-      if extraAudio then
-        if suppressExtra then
-          pendingExtra = nil
-          if extraAudio.isActive() then pcall(extraAudio.stop) end
-        elseif mod.options:get("enabled") ~= false then
-          pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
-          if pendingExtra and okChipAudio and type(ChipAudio.currentSource) == "function" then
-            local okSource, source = pcall(ChipAudio.currentSource)
-            local okPlaying, playing = okSource and source and pcall(source.isPlaying, source)
-            if okPlaying and playing then
-              pendingExtra = nil
+      -- Gen3 hosts use gbaExtraAudio (installed into gen3.lua); gen1/2 use
+      -- extraAudio. The inactive instance is a no-op, so drive both to keep
+      -- their sources pumped after switching hosts/songs.
+      for _, audio in ipairs({ extraAudio, gbaExtraAudio }) do
+        if audio then
+          pcall(audio.setExtraMix, mod.options:get("extra_mix"))
+          if suppressExtra or mod.options:get("enabled") == false then
+            pendingExtra = nil
+            pcall(audio.stop)
+          else
+            if pendingExtra and okChipAudio and type(ChipAudio.currentSource) == "function" then
+              local okSource, source = pcall(ChipAudio.currentSource)
+              local okPlaying, playing = okSource and source and pcall(source.isPlaying, source)
+              if okPlaying and playing then
+                pendingExtra = nil
+              end
             end
+            pcall(audio.update)
           end
-          pcall(extraAudio.update)
-        else
-          pendingExtra = nil
-          pcall(extraAudio.stop)
         end
       end
       return result

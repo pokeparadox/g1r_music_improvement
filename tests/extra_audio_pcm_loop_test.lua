@@ -12,6 +12,7 @@ local replacement = [[  return {
     _internals = {
       pcmPrepare = pcmPrepare, pcmRender = pcmRender,
       pcmSeek = pcmSeek, pcmTickToSample = pcmTickToSample,
+      chipGainFor = chipGainFor,
     },
     start = start,]]
 source, count = source:gsub(needle, replacement, 1)
@@ -103,6 +104,61 @@ do
 end
 
 do
+  -- GBA samples share the bus with chip voices: duck PCM so the chip layer
+  -- stays audible instead of being masked by full-scale DirectSound data.
+  local fullSample = {
+    data = string.rep(string.char(0xFF, 0x7F), 20), sampleRate = 44100,
+  }
+  audio.setSampleReader(function(bank)
+    if bank == 3 then return fullSample end
+    return loopSample
+  end)
+  local built = internals.pcmPrepare({}, {
+    pcm = {
+      events = { event(0, 200, 3) },
+      tempoTimeline = { { tick = 0, tempo = 300 } },
+    },
+  })
+  check(built, "PCM duck prepare failed")
+  local left, right = {}, {}
+  for frame = 0, 399 do left[frame], right[frame] = 0, 0 end
+  internals.pcmRender(built, left, right, 0, 400, 1)
+  local peak = 0
+  for frame = 0, 399 do peak = math.max(peak, math.abs(left[frame] or 0)) end
+  check(peak > 0.25, "PCM duck rendered silence: " .. tostring(peak))
+  check(peak <= 0.61, "PCM must stay under full chip gain: " .. tostring(peak))
+end
+
+do
+  -- Lead notes carry gainScale=1.4; samples must not lose that boost or the
+  -- lead disappears behind the chip backing track.
+  local fullSample = {
+    data = string.rep(string.char(0xFF, 0x7F), 20), sampleRate = 44100,
+  }
+  audio.setSampleReader(function(bank)
+    if bank == 4 then return fullSample end
+    return loopSample
+  end)
+  local leadEvent = event(0, 200, 4)
+  leadEvent.gainScale = 1.4
+  local built = internals.pcmPrepare({}, {
+    pcm = {
+      events = { leadEvent },
+      tempoTimeline = { { tick = 0, tempo = 300 } },
+    },
+  })
+  check(built, "PCM lead prepare failed")
+  local left, right = {}, {}
+  for frame = 0, 399 do left[frame], right[frame] = 0, 0 end
+  internals.pcmRender(built, left, right, 0, 400, 1)
+  local peak = 0
+  for frame = 0, 399 do peak = math.max(peak, math.abs(left[frame] or 0)) end
+  -- Center pan contributes 0.75 per side, so a 1.4 lead boost peaks ~0.5.
+  check(peak > 0.45, "PCM lead boost missing: " .. tostring(peak))
+  check(peak <= 0.65, "PCM lead boost too high: " .. tostring(peak))
+end
+
+do
   local ticks = 3456
   local gbExpected = math.floor(ticks * 44100 * 148 / 15360 + 0.5)
   check(internals.pcmTickToSample({
@@ -113,6 +169,18 @@ do
     { tick = 0, tempo = 260 },
   }, ticks) == legacyExpected, "G3 PCM must keep exact score rate")
   check(gbExpected ~= legacyExpected, "tempo drift fixture too short")
+end
+
+do
+  -- PCM carrier sides must not bury chip notes when spec.gain sits at the
+  -- converter floor (0.35).  Pure-chip sides keep converter balance.
+  local lowGain = 0.45 * 0.354
+  local lifted = internals.chipGainFor(0.354, lowGain, true)
+  check(math.abs(lifted - 0.36) < 0.01, "PCM chip gain " .. tostring(lifted))
+  check(internals.chipGainFor(0.354, lowGain, false) == lowGain,
+    "non-PCM side adjusted")
+  check(math.abs(internals.chipGainFor(1, 0.45, true) - 0.45) < 1e-9,
+    "full-gain side changed")
 end
 
 package.loaded["src.core.ChipSynth"] = previousSynth
