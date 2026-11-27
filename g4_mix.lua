@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v16"
+local CONVERTER_VERSION = "g4_v26"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -258,14 +258,14 @@ local function unique(list)
   return out
 end
 
-local function songNamesFor(group, key)
+local function songNamesFor(group, key, mode)
   local out = {}
   local map = deps.songMap
   if not map then return out end
   local function collect(value)
     local names
     if type(map.namesFor) == "function" then
-      local ok, result = pcall(map.namesFor, value)
+      local ok, result = pcall(map.namesFor, value, mode)
       if ok then names = result end
     elseif type(map.BY_KEY) == "table" then
       names = map.BY_KEY[value]
@@ -302,10 +302,10 @@ local function isRawLabel(label)
   return type(label) == "string" and label:sub(1, #RAW_PREFIX) == RAW_PREFIX
 end
 
-local function mappedSongFor(label)
+local function mappedSongFor(label, mode)
   if isRawLabel(label) then return songByName(label:sub(#RAW_PREFIX + 1)) end
   local group, key = groupForLabel(label)
-  local names = songNamesFor(group, key)
+  local names = songNamesFor(group, key, mode)
   for _, name in ipairs(names) do
     local song = songByName(name)
     if song then return song end
@@ -334,10 +334,10 @@ local function mixLabelsForLabel(label, version, group)
   return unique(out)
 end
 
-function M.has(version, label)
+function M.has(version, label, mode)
   if not M.available() then return false end
   if isRawLabel(label) then return songByName(label:sub(#RAW_PREFIX + 1)) ~= nil end
-  if not mappedSongFor(label) then return false end
+  if not mappedSongFor(label, mode) then return false end
   local group = groupForLabel(label)
   local generation = generationForVersion(version)
   if generation == 3 then
@@ -886,7 +886,7 @@ local function decodeTrack(seq, start, voices, songBank)
   }
 end
 
-local function synthTrack(decoded, perNoteState, mutePcm)
+local function synthTrack(decoded, perNoteState, mutePcm, muteAll)
   local out, current, lastVoice = {}, 0, nil
   local loopTarget
   local function emit(event)
@@ -927,7 +927,7 @@ local function synthTrack(decoded, perNoteState, mutePcm)
     elseif kind == "note" then
       -- On GB hosts PCM voices are rendered by extra_audio; muting the
       -- matching GB note avoids doubling while waits keep exact timing.
-      if not (mutePcm and event.hasPcm) then
+      if not (muteAll or (mutePcm and event.hasPcm)) then
         if perNoteState then
           -- Premixed tracks carry notes from several SSEQ tracks; state must be
           -- restated per note or one track's instrument/pan leaks into another.
@@ -964,6 +964,86 @@ local function synthTrack(decoded, perNoteState, mutePcm)
   for _, value in ipairs(out) do bytes[#bytes + 1] = string.char(value) end
   return table.concat(bytes)
 end
+
+-- Split one decoded SSEQ track into one stream per instrument voice.  g3_mix
+-- gives each spec four GB hardware channels; keeping unrelated instruments in
+-- the same spec makes simultaneous notes delay each other and lose parts.
+local function splitDecodedByVoice(decoded)
+  local voices, seen = {}, {}
+  for _, event in ipairs(decoded.events or {}) do
+    if event.kind == "note" then
+      local voice = event.voice or 0
+      if not seen[voice] then
+        seen[voice] = true
+        voices[#voices + 1] = voice
+      end
+    end
+  end
+  if #voices <= 1 then return { decoded } end
+  local groups, byVoice = {}, {}
+  for _, voice in ipairs(voices) do
+    local group = {
+      events = {}, ticks = decoded.ticks, loopStart = decoded.loopStart,
+      loopEndTick = decoded.loopEndTick,
+    }
+    groups[#groups + 1] = group
+    byVoice[voice] = group
+  end
+  local function clone(event)
+    local copy = {}
+    for key, value in pairs(event) do copy[key] = value end
+    return copy
+  end
+  for _, event in ipairs(decoded.events or {}) do
+    if event.kind == "note" then
+      local group = byVoice[event.voice or 0]
+      group.events[#group.events + 1] = clone(event)
+    else
+      for _, group in ipairs(groups) do
+        group.events[#group.events + 1] = clone(event)
+      end
+    end
+  end
+  return groups
+end
+
+M.splitDecodedByVoice = splitDecodedByVoice
+
+-- G4 GB splits one SSEQ track into one spec per voice.  SSEQ track order is
+-- not musical order: the high lead often lands in a later spec, while spec 1
+-- is accompaniment.  Pick the melodic voice for the primary engine instead of
+-- blindly promoting track 1.  Mirrors g3_mix.analyzeTrack's lead heuristic
+-- without depending on its private helpers.
+local function chipPrimaryIndex(specTracks, voicegroups)
+  local bestIndex, bestScore = 1, -math.huge
+  for index, track in ipairs(specTracks) do
+    local keySum, noteCount, waveCount = 0, 0, 0
+    for _, event in ipairs(track.events or {}) do
+      if event.kind == "note" then
+        local tone = voicegroups and voicegroups[1] and voicegroups[1][event.voice]
+        local kind = tone and tonumber(tone.type) or 1
+        if kind ~= 4 then
+          keySum = keySum + (tonumber(event.key) or 0)
+          noteCount = noteCount + 1
+          if kind == 3 then waveCount = waveCount + 1 end
+        end
+      end
+    end
+    if noteCount > 0 and noteCount <= 160 then
+      local avgKey = keySum / noteCount
+      if avgKey >= 55 then
+        local score = avgKey - noteCount * 0.02
+        if waveCount * 2 > noteCount then score = score + 12 end
+        if score > bestScore then
+          bestScore, bestIndex = score, index
+        end
+      end
+    end
+  end
+  return bestIndex
+end
+
+M.chipPrimaryIndex = chipPrimaryIndex
 
 -- Premix: g3_mix emits one spec per four tracks and extra_audio has 16 engine
 -- slots.  Only when a song would exceed 16 specs, fold tracks sharing a pan
@@ -1199,9 +1279,10 @@ local function pcmForTracks(tracks, voicegroups, generation)
   }
 end
 
-function M.convert(version, label)
+function M.convert(version, label, mode)
+  mode = mode == "chip" and "chip" or mode == "pcm" and "pcm" or "hybrid"
   if not M.available() then return setError(M.lastError or "NDS import unavailable") end
-  local song = mappedSongFor(label)
+  local song = mappedSongFor(label, mode)
   if not song then return setError("no imported SSEQ for " .. tostring(label)) end
   local seq = sequenceFor(song)
   if not seq then return setError("no sequence data for " .. tostring(song.name)) end
@@ -1226,38 +1307,63 @@ function M.convert(version, label)
       groupedTracks = groupedDecoded
     end
   end
-  -- One spec per decoded track. The old four-tracks-per-spec grouping made
-  -- short voices wait at the longest track's loop point, sounding like a pause.
+  -- One chip spec per decoded track in PCM/hybrid paths. G4 GB splits further by
+  -- instrument voice so unrelated parts do not collide on four GB channels.
+  -- PSG-only P scores stay chip notes; SBNK sample voices keep PCM and mute
+  -- duplicate chip notes, matching the v21 instrument-level hybrid.
   local specs, specTracks, specPcms = {}, {}, {}
   local premixed = sourceTracks > songDef.tracks
-  for trackIndex, trackBytes in ipairs(songDef.trackData) do
-    local pcm = pcmForTracks({ groupedTracks[trackIndex] }, voicegroups, generation)
-    specPcms[trackIndex] = pcm
-    -- Base spec stays chip-only (base source has no PCM path). Side specs on
-    -- GB hosts mute notes backed by PCM so extra_audio does not double voices.
-    if pcm and generation < 3 and trackIndex > 1 then
-      trackBytes = synthTrack(groupedTracks[trackIndex], premixed, true)
-    end
+  local function addSpec(decoded, trackBytes, index, pcm)
     local perTrackSong = {
       name = songDef.name, tracks = 1, trackData = { trackBytes },
       voicegroup = 1,
     }
-    local built
     local ok, result = pcall(deps.g3Mix.buildSpecs, perTrackSong, voicegroups,
       { voicegroupId = 1 })
     if not ok then return setError("buildSpecs: " .. tostring(result)) end
     if type(result) ~= "table" or not result[1] then
-      return setError("no chip specs for track " .. tostring(trackIndex))
+      return setError("no chip specs for track " .. tostring(index))
     end
     for _, spec in ipairs(result) do
       specs[#specs + 1] = spec
-      specTracks[#specTracks + 1] = groupedTracks[trackIndex]
+      specTracks[#specTracks + 1] = decoded
+      specPcms[#specs] = pcm
+    end
+    return true
+  end
+  for trackIndex, trackBytes in ipairs(songDef.trackData) do
+    local decoded = groupedTracks[trackIndex]
+    if mode == "chip" then
+      for _, voiceTrack in ipairs(splitDecodedByVoice(decoded)) do
+        -- PSG voices stay chip notes. SBNK sample voices play real SWAV PCM;
+        -- their duplicate chip notes are muted to avoid doubling.
+        local pcm = pcmForTracks({ voiceTrack }, voicegroups, generation)
+        local ok, err = addSpec(voiceTrack,
+          synthTrack(voiceTrack, true, true), trackIndex, pcm)
+        if not ok then return nil, err end
+      end
+    else
+      local pcm = pcmForTracks({ decoded }, voicegroups, generation)
+      -- G4 Mix is PCM-only; the legacy hybrid mutes GB notes backed by PCM.
+      if mode == "pcm" then
+        trackBytes = synthTrack(decoded, premixed, false, true)
+      elseif pcm and generation < 3 and trackIndex > 1 then
+        trackBytes = synthTrack(decoded, premixed, true)
+      end
+      local ok, err = addSpec(decoded, trackBytes, trackIndex, pcm)
+      if not ok then return nil, err end
     end
   end
-  local def = specs[1]
+  -- For G4 GB the lead can sit in any voice stream; promote that spec to the
+  -- primary engine so it is not buried behind accompaniment at side-engine
+  -- mix levels.  PCM/hybrid keep original SSEQ track order.
+  local primaryIndex = mode == "chip"
+    and chipPrimaryIndex(specTracks, voicegroups) or 1
+  local def = specs[primaryIndex]
   def.generation = generation
-  def.g4Mix = true
-  def.converter = CONVERTER_VERSION
+  def.g4Mix = mode ~= "chip"
+  def.g4Gb = mode == "chip"
+  def.converter = CONVERTER_VERSION .. "_" .. mode
   if sourceTracks > songDef.tracks then
     def.premix = true
     def.sourceTracks = sourceTracks
@@ -1265,11 +1371,14 @@ function M.convert(version, label)
   local extra = {}
   for i, spec in ipairs(specs) do
     spec.pcm = specPcms[i]
-    if i > 1 then
+    if i ~= primaryIndex then
       spec.generation = generation
-      spec.g4Mix = true
-      spec.converter = CONVERTER_VERSION
+      spec.g4Mix = mode ~= "chip"
+      spec.g4Gb = mode == "chip"
+      spec.converter = def.converter
       spec.premix = def.premix or nil
+      -- Keep original spec index in the key so promotion only swaps which
+      -- spec is primary; runtime source toggles stay stable.
       extra["g4_" .. i] = spec
     end
   end

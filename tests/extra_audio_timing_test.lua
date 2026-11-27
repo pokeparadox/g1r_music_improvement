@@ -120,6 +120,15 @@ now = 91
 preparedAudio.update()
 eq(preparedSource.playing, true, "prepared harmony starts with the base")
 eq(preparedEngine.samples, 8192, "starting with base does not skip the lead")
+local telemetry = preparedAudio.telemetry()
+eq(telemetry.sides[1], "left", "telemetry lists active side engines")
+eq(telemetry.active, true, "telemetry reports the active harmony source")
+check(telemetry.peak >= 0, "telemetry reports a rendered peak")
+check(type(telemetry.sideStats) == "table", "telemetry reports per-side stats")
+for _, stats in pairs(telemetry.sideStats) do
+  check(stats.rawPeak >= 0, "per-side stats include raw peak")
+  check(type(stats.err) == "string", "per-side stats include soundData error")
+end
 preparedAudio.stop()
 
 -- A paused base source must not accrue the pause duration as elapsed audio.
@@ -237,8 +246,8 @@ check(sources[#sources] ~= stalledSource, "underrun rebuilds the harmony source"
 audio.stop()
 baseSource.playing = true
 
--- GBA G4 Mix songs can carry many side engines. The GBA profile caps
--- concurrent engines so ungrouped tracks never overload the mixer.
+-- GBA G4 Mix songs can carry many side engines. Every side song gets its
+-- own engine; the GBA profile no longer truncates the fan-out.
 now = 800
 baseSource.playing = true
 local gbaAudio = newAudio()
@@ -249,8 +258,8 @@ for slot = 1, 20 do
   gbaSong[slot] = { chip = {} }
 end
 gbaAudio.start(gbaSong, {}, now, true)
-eq(#synth.engines - beforeGbaEngines, 16,
-  "GBA profile caps side engines at 16 slots")
+eq(#synth.engines - beforeGbaEngines, 20,
+  "GBA profile keeps every side engine")
 gbaAudio.stop()
 
 -- Direct PCM voices resolve SWAV samples through the reader supplied by

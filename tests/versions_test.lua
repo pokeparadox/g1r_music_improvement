@@ -30,6 +30,11 @@ assert(V.variantLabel("g1") == "G1")
 assert(V.variantLabel("g2_improved") == "G2E")
 assert(V.variantLabel({ id = "Music_MixCities1_firered" }) == "G3 Mix")
 assert(V.variantLabel({ native = true, generation = 3 }) == "G3")
+assert(V.variantKind("Music_G4MixPalletTown_soulsilver") == "g4_mix")
+assert(V.variantKind("Music_G4GBPalletTown_soulsilver") == "g4_gb")
+assert(V.variantKind({ candidate = { g4Gb = true }, generation = 2 }) == "g4_gb")
+assert(V.variantLabel("g4_mix") == "G4 Mix")
+assert(V.variantLabel("g4_gb") == "G4 (GB)")
 
 -- Host-native improved IDs have no source suffix; label from loaded game.
 assert(V.variantKind("Music_ImprovedTitleScreen", 2) == "g2_improved")

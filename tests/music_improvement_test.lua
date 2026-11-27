@@ -800,15 +800,17 @@ T.eq(type(sourceScreen and sourceScreen.new), "function",
   "source screen is registered")
 local sourceMenu = sourceScreen.new(run.data)
 T.eq(sourceMenu.rows, 5, "source menu leaves room for the footer")
-local sourceLabels = { "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G4 MIX", "G3" }
+local sourceLabels = {
+  "SHUFFLE", "G1", "G1E", "G2", "G2E", "G3 MIX", "G4 MIX", "G4 GB", "G3",
+}
 for index, label in ipairs(sourceLabels) do
   T.eq(sourceMenu.items[index] and sourceMenu.items[index].label, label,
     "source toggle " .. index .. " is " .. label)
 end
-T.eq(sourceMenu.items[8].right, "N/A",
+T.eq(sourceMenu.items[9].right, "N/A",
   "native G3 is unavailable outside GBA hosts")
 local gbaSourceMenu = sourceScreen.new({ save = { version = "firered" } })
-T.eq(gbaSourceMenu.items[8].right, "YES",
+T.eq(gbaSourceMenu.items[9].right, "YES",
   "native G3 is enabled on GBA hosts")
 
 if cache and exports and type(cache.delete) == "function" then
@@ -921,8 +923,13 @@ T.eq(type(mainSource) == "string"
   true, "Gen3 enhance prompt is gated on the field phase")
 T.eq(type(mainSource) == "string"
   and mainSource:find("elseif generation == hostGeneration then", 1, true) ~= nil
-  and mainSource:find("g4Mix.has(entry.id, candidateLabel)", 1, true) ~= nil,
+  and mainSource:find("g4Mix.has(entry.id, candidateLabel, \"pcm\")", 1, true) ~= nil,
   true, "G4 candidates enumerate host generation (Gold gets G2 variants)")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.pcm then translated.pcm = def.pcm end",
+    1, true) ~= nil,
+  true, "G4 base specs keep PCM refs through translation")
 T.eq(type(mainSource) == "string"
   and mainSource:find(
     "if g4CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then",
@@ -943,6 +950,43 @@ T.eq(type(mainSource) == "string"
 T.eq(type(mainSource) == "string"
   and mainSource:find("if spec.pcm then song.pcm = spec.pcm end", 1, true) ~= nil,
   true, "G4 extra songs retain PCM refs for extra_audio")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.gain then translated.gain = def.gain end",
+    1, true) ~= nil
+  and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.pan then translated.pan = def.pan end",
+    1, true) ~= nil,
+  true, "G4 base songs retain spec gain and pan through translation")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("if isG4VariantId(currentSong) then return end", 1, true)
+    ~= nil,
+  true, "G4 extras survive frame stalls so the lead does not disappear")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "local okExtraImprove, improvedSpec = pcall(improve, spec, settings)",
+    1, true) ~= nil,
+  true, "G4 extra voices get the same hw1 duty lift as the base song")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("G4 harmony started sides=%s active=%s", 1, true) ~= nil
+  and mainSource:find("G4 harmony rendered stage=%d sides=%s peak=%.3f gain=%.2f vol=%.2f fade=%.2f paused=%s rendered=%d stats=%s",
+    1, true) ~= nil
+  and mainSource:find("stats.rawPeak or 0", 1, true) ~= nil
+  and mainSource:find("stats.err or \"-\"", 1, true) ~= nil
+  and mainSource:find("g4PeakStages = { 44100 * 2, 44100 * 25 }", 1, true) ~= nil
+  and mainSource:find("G4 harmony stopped sides=%s peak=%.3f gain=%.2f rendered=%d",
+    1, true) ~= nil,
+  true, "G4 harmony telemetry logs side list, activity, peak and gain")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("local function logG4Harmony(", 1, true) ~= nil
+  and mainSource:find("g4_harmony.log", 1, true) ~= nil,
+  true, "G4 harmony telemetry persists to the mod cache log")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("local enhancementActive = harmonyAllowed()", 1, true) ~= nil
+  and mainSource:find("elseif harmonyAllowed() then", 1, true) ~= nil
+  and mainSource:find("elseif mod.options:get(\"enabled\") ~= false then", 1, true)
+    == nil,
+  true, "jukebox keeps harmony when MUSIC IMPROVEMENTS is off")
 
 -- Gen3 right labels must use the GBA viewport, not the desktop window width.
 local fontKey = "src.ui.game3.frlg_font"
