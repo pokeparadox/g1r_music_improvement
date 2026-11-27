@@ -37,11 +37,15 @@ local built = audio._internals.pcmPrepare({}, {
   pcm = {
     events = { { tick = 0, gate = 5000, key = 60, pitch = 60,
       rateHz = 22050, vel = 100, volume = 100, pan = 0x40,
+      attack = 255, decay = 0, sustain = 255, release = 0,
       bank = bank, archive = 7, wave = 0 } },
     tempoTimeline = { { tick = 0, tempo = 300, gb = 128 } },
   },
 })
 check(built, "GBA PCM prepare failed")
+check(built.events[1].attack == 255 and built.events[1].decay == 0
+  and built.events[1].sustain == 255 and built.events[1].release == 0,
+  "MP2K ADSR must survive pcmPrepare")
 check(seenBank == bank, "reader got GBA bank")
 check(seenDef == bank, "reader got GBA def")
 
@@ -51,6 +55,19 @@ audio._internals.pcmRender(built, left, right, 0, 4, 1)
 check(#built.active == 1, "GBA PCM voice missing")
 check(math.abs(built.active[1].phase - 2) < 1e-9,
   "rateHz must set phase step: " .. tostring(built.active[1].phase))
+
+local long = audio._internals.pcmPrepare({}, {
+  pcm = {
+    events = { { tick = 0, gate = 5000, key = 60, pitch = 60,
+      rateHz = 22050, vel = 100, volume = 100, pan = 0x40,
+      attack = 255, decay = 0, sustain = 255, release = 255,
+      bank = bank, archive = 7, wave = 0 } },
+    tempoTimeline = { { tick = 0, tempo = 300, gb = 128 } },
+  },
+})
+audio._internals.pcmRender(long, left, right, 0, 4, 1)
+check(long.active[1].stop > built.active[1].stop + 1000,
+  "MP2K release must extend voice tail")
 
 -- Gen3 starts gbaExtraAudio from gen3.lua, never extraAudio. Both instances
 -- must be pumped or FR PCM buffers are never queued.
@@ -63,7 +80,15 @@ while true do
   wired, from = wired + 1, at + 1
 end
 check(wired >= 2, "main.lua must drive both extra engines in frameGuard and game.update")
-check(main:find("pcall(audio.update)", 1, true), "main.lua must pump the active extra engine")
+check(main:find("pcall(extraAudio.update)", 1, true),
+  "main.lua must pump the active extra engine")
+local gen3 = assert(io.open("gen3.lua", "rb")):read("*a")
+check(gen3:find("pcall(deps.extraAudio.update)", 1, true),
+  "gen3.lua must pump the injected GBA extra engine")
+check(main:find("byte >= 128 then byte = byte - 256 end", 1, true),
+  "GBA s8 samples must stay sign-extended")
+check(main:find("/ 16384) % 2 == 1", 1, true),
+  "GBA loop detection must use the 0x4000 flag bit")
 
 if previousSynth ~= nil then
   package.loaded["src.core.ChipSynth"] = previousSynth

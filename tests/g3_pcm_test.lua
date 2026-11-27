@@ -48,4 +48,27 @@ assert(chipOnly and chipOnly[1], "chip fallback without samples")
 eq(#chipOnly, 1, "no carrier without samples")
 eq(chipOnly[1].pcm, nil, "no PCM without samples")
 
+-- Drum-kit sub-tone: type 128 points at a DirectSound sub-tone. Its sampleId
+-- and ADSR must survive resolveTone instead of falling back to GB noise.
+local drumTrack = string.char(0xBD, 0x01, 0xD3, 36, 100, 0xB1)
+local drumSamples = {
+  [9] = { id = 9, key = 36, freq = 11000 * 1024, offset = 0, size = 120,
+    loopStart = 0, status = 0 },
+}
+local drumGroups = {
+  [1] = { [1] = { type = 128, key = 36, subVgId = 2 } },
+  [2] = { [36] = { type = 0, key = 36, sampleId = 9,
+    attack = 255, decay = 4, sustain = 7, release = 3, pan = 0x40 } },
+}
+local drumSong = { tracks = 1, trackData = { drumTrack }, voicegroup = 1 }
+local drumSpecs = mix.buildSpecs(drumSong, drumGroups,
+  { voicegroupId = 1, samples = drumSamples, version = "firered" })
+assert(drumSpecs and drumSpecs[2] and drumSpecs[2].pcm, "drum kit keeps PCM")
+local drum = drumSpecs[2].pcm.events[1]
+eq(drum.bank.sampleId, 9, "drum kit uses real GBA sample")
+eq(drum.attack, 255, "drum kit attack copied")
+eq(drum.decay, 4, "drum kit decay copied")
+eq(drum.sustain, 7, "drum kit sustain copied")
+eq(drum.release, 3, "drum kit release copied")
+
 print("g3_pcm_test: ok")

@@ -125,6 +125,10 @@ return function()
   -- samples mask the chip layer. Keep samples under the chip by default.
   -- ponytail: fixed ceiling, add a profile knob only if FR sample level needs tuning.
   local PCM_GAIN = 0.6
+  -- MP2K DS envelopes advance once per GBA VBlank; extraAudio renders at
+  -- ChipSynth's rate, so convert that frame tick to output samples.
+  local GBA_FRAME_SAMPLES = SAMPLE_RATE * 280896 / 16777216
+  local RELEASE_FRAMES = 255
 
   local function pcmSample(data, frame)
     local index = frame * 2 + 1
@@ -133,6 +137,38 @@ return function()
     local value = lo + hi * 256
     if value >= 32768 then value = value - 65536 end
     return value / 32768
+  end
+
+  local function pcmAdsrValue(event, field, default)
+    local value = tonumber(event[field])
+    if not value then return default end
+    return math.max(0, math.min(255, math.floor(value + 0.5)))
+  end
+
+  -- pokefirered m4a_mix.tickEnvelope, stepped once per GBA frame.
+  local function pcmTickEnvelope(voice)
+    local a = voice.adsr
+    if voice.released then
+      voice.envVol = math.floor(voice.envVol * a.release / 256)
+      if voice.envVol <= 0 then voice.alive = false end
+    elseif voice.envPhase == "attack" then
+      voice.envVol = math.min(255, voice.envVol + a.attack)
+      if voice.envVol >= 255 then voice.envPhase = "decay" end
+    elseif voice.envPhase == "decay" then
+      voice.envVol = math.floor(voice.envVol * a.decay / 256)
+      if voice.envVol <= a.sustain then
+        voice.envVol = a.sustain
+        voice.envPhase = "sustain"
+        if voice.envVol <= 0 then voice.alive = false end
+      end
+    end
+  end
+
+  local function pcmReleaseFrames(release)
+    if release <= 0 then return 1 end
+    if release >= 255 then return RELEASE_FRAMES end
+    local frames = math.ceil(math.log(255) / -math.log(release / 256))
+    return math.max(1, math.min(RELEASE_FRAMES, frames))
   end
 
   local function pcmTickToSample(timeline, tick)
@@ -220,6 +256,15 @@ return function()
       if sample then
         local at = pcmTickToSample(timeline, event.tick)
         local gateEnd = pcmTickToSample(timeline, event.tick + (event.gate or 1))
+        local hasAdsr = false
+        for _, field in ipairs({ "attack", "decay", "sustain", "release" }) do
+          if event[field] ~= nil then hasAdsr = true end
+        end
+        -- MP2K DS tones carry raw 0..255 ADSR; missing values use raw defaults.
+        -- Events without any ADSR (G4, older curves) keep the legacy shape.
+        local defaults = hasAdsr
+          and { attack = 255, decay = 0, sustain = 255, release = 0 }
+          or { attack = 255, decay = 0, sustain = 255, release = 98 }
         events[#events + 1] = {
           at = at, gateSamples = math.max(1, gateEnd - at),
           key = tonumber(event.key) or 60, pitch = tonumber(event.pitch) or 60,
@@ -229,6 +274,10 @@ return function()
           volume = math.max(1, math.min(127, tonumber(event.volume) or 100)),
           pan = tonumber(event.pan) or 0x40,
           sample = sample,
+          attack = pcmAdsrValue(event, "attack", defaults.attack),
+          decay = pcmAdsrValue(event, "decay", defaults.decay),
+          sustain = pcmAdsrValue(event, "sustain", defaults.sustain),
+          release = pcmAdsrValue(event, "release", defaults.release),
         }
       end
     end
@@ -287,17 +336,27 @@ return function()
           and event.rateHz / SAMPLE_RATE
           or (rate / SAMPLE_RATE * 2 ^ ((event.key - event.pitch) / 12))
         local pan = math.max(-1, math.min(1, (event.pan - 0x40) / 0x80))
+        local adsr = {
+          attack = event.attack, decay = event.decay,
+          sustain = event.sustain, release = event.release,
+        }
+        local releaseSamples = math.ceil(
+          pcmReleaseFrames(adsr.release) * GBA_FRAME_SAMPLES)
         pcm.active[#pcm.active + 1] = {
           data = data, phase = 0, loopStart = loopStart,
           endFrame = hasLoop and loopEnd or frames - 1,
           loop = hasLoop and true or false,
           step = ratio, start = at,
-          stop = at + event.gateSamples + math.floor(SAMPLE_RATE * 0.08),
+          stop = at + event.gateSamples + releaseSamples,
           gateEnd = at + event.gateSamples,
           gain = baseGain * PCM_GAIN * event.gainScale
             * math.sqrt((event.vel / 127) * (event.volume / 127)),
           leftGain = 0.5 + 0.25 * (1 - pan),
           rightGain = 0.5 + 0.25 * (1 + pan),
+          adsr = adsr, envPhase = adsr.attack > 0 and "attack" or "decay",
+          envVol = adsr.attack > 0 and 0 or 255, envFrom = 0,
+          envTick = at, nextTick = at + GBA_FRAME_SAMPLES,
+          released = false, alive = true,
         }
       end
       pcm.nextEvent = pcm.nextEvent + 1
@@ -307,22 +366,22 @@ return function()
       local mixedL, mixedR = 0, 0
       for v = #pcm.active, 1, -1 do
         local voice = pcm.active[v]
-        if sampleIndex >= voice.stop or sampleIndex < pcm.pos then
+        if sampleIndex >= voice.stop or sampleIndex < pcm.pos
+          or not voice.alive then
           table.remove(pcm.active, v)
         elseif sampleIndex >= voice.start then
-          local elapsed = (sampleIndex - voice.start) / SAMPLE_RATE
-          local attack, decay, sustain = 0.006, 0.04, 0.65
-          local env
-          if elapsed < attack then
-            env = elapsed / attack
-          elseif elapsed < attack + decay then
-            env = 1 - (1 - sustain) * (elapsed - attack) / decay
-          elseif sampleIndex < voice.gateEnd then
-            env = sustain
-          else
-            env = sustain * math.max(0, 1
-              - (sampleIndex - voice.gateEnd) / (SAMPLE_RATE * 0.08))
+          if sampleIndex >= voice.gateEnd then voice.released = true end
+          while sampleIndex >= voice.nextTick and voice.alive do
+            voice.envTick = voice.nextTick
+            voice.envFrom = voice.envVol
+            pcmTickEnvelope(voice)
+            voice.nextTick = voice.nextTick + GBA_FRAME_SAMPLES
           end
+          local envFrac = (sampleIndex - voice.envTick) / GBA_FRAME_SAMPLES
+          envFrac = math.max(0, math.min(1, envFrac))
+          local env = voice.alive
+            and (voice.envFrom + (voice.envVol - voice.envFrom) * envFrac) / 255
+            or 0
           local frame = math.floor(voice.phase)
           local value = pcmSample(voice.data, frame)
           local frac = voice.phase - frame

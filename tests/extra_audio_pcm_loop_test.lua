@@ -121,10 +121,11 @@ do
   })
   check(built, "PCM duck prepare failed")
   local left, right = {}, {}
-  for frame = 0, 399 do left[frame], right[frame] = 0, 0 end
-  internals.pcmRender(built, left, right, 0, 400, 1)
+  -- MP2K envelopes step per GBA frame (~739 samples at 44.1 kHz).
+  for frame = 0, 1599 do left[frame], right[frame] = 0, 0 end
+  internals.pcmRender(built, left, right, 0, 1600, 1)
   local peak = 0
-  for frame = 0, 399 do peak = math.max(peak, math.abs(left[frame] or 0)) end
+  for frame = 0, 1599 do peak = math.max(peak, math.abs(left[frame] or 0)) end
   check(peak > 0.25, "PCM duck rendered silence: " .. tostring(peak))
   check(peak <= 0.61, "PCM must stay under full chip gain: " .. tostring(peak))
 end
@@ -149,10 +150,11 @@ do
   })
   check(built, "PCM lead prepare failed")
   local left, right = {}, {}
-  for frame = 0, 399 do left[frame], right[frame] = 0, 0 end
-  internals.pcmRender(built, left, right, 0, 400, 1)
+  -- MP2K envelopes step per GBA frame (~739 samples at 44.1 kHz).
+  for frame = 0, 1599 do left[frame], right[frame] = 0, 0 end
+  internals.pcmRender(built, left, right, 0, 1600, 1)
   local peak = 0
-  for frame = 0, 399 do peak = math.max(peak, math.abs(left[frame] or 0)) end
+  for frame = 0, 1599 do peak = math.max(peak, math.abs(left[frame] or 0)) end
   -- Center pan contributes 0.75 per side, so a 1.4 lead boost peaks ~0.5.
   check(peak > 0.45, "PCM lead boost missing: " .. tostring(peak))
   check(peak <= 0.65, "PCM lead boost too high: " .. tostring(peak))

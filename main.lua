@@ -115,8 +115,7 @@ return function(mod)
     end
     local loopStart = tonumber(source.loopStart) or 0
     local size = tonumber(source.size) or 0
-    local loop = math.floor((tonumber(source.status) or 0) / 16384) % 4 ~= 0
-      and loopStart < size
+    local loop = math.floor((tonumber(source.status) or 0) / 16384) % 2 == 1
     return { data = table.concat(pcm),
       sampleRate = tonumber(source.freq) and math.floor(source.freq / 1024 + 0.5) or 44100,
       loopStart = loopStart, loopEnd = size - 1, loop = loop }

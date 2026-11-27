@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 8
+local CONVERTER_VERSION = 9
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -533,10 +533,7 @@ local function resolveTone(voicegroups, vgId, voiceId, rawKey, depth)
   if rhythm then
     local sub = resolveTone(voicegroups, tone.subVgId, rawKey, rawKey, depth + 1)
     if not sub then return nil end
-    local copy = {}
-    for _, field in ipairs({ "type", "key", "wavParam", "wave" }) do
-      copy[field] = sub[field]
-    end
+    local copy = copyTable(sub)
     copy.isRhy = true
     return copy
   end
@@ -545,13 +542,6 @@ end
 
 local function toneInfo(voicegroups, vgId, note, specWaves, samples, version)
   local tone = resolveTone(voicegroups, vgId, note.voice, note.rawKey)
-  if tone and tone.isRhy then
-    local preset = drumPresetFor(note.rawKey or note.key)
-    if preset then
-      note.drumPreset = preset
-      return preset.kind, preset.duty, nil, tone
-    end
-  end
   local typ = tone and tone.type or 0
   local kind = typ % 8
   if kind == 0 and tone and tone.sampleId and samples then
@@ -576,6 +566,13 @@ local function toneInfo(voicegroups, vgId, note, specWaves, samples, version)
         }
         tone = pcmTone
       end
+    end
+  end
+  if tone and tone.isRhy and not tone.pcm then
+    local preset = drumPresetFor(note.rawKey or note.key)
+    if preset then
+      note.drumPreset = preset
+      return preset.kind, preset.duty, nil, tone
     end
   end
   if kind < 1 or kind > 4 then kind = 1 end
@@ -1010,12 +1007,22 @@ function M.buildSpecs(song, voicegroups, info)
         local pcm = note.tone and note.tone.pcm
         if pcm then
           local segment = note.segments[1] or note
+          local toneForAdsr = note.tone or {}
+          local overrides = note.toneOverrides
+          local function pcmAdsr(field)
+            if overrides and overrides[field] ~= nil then
+              return overrides[field]
+            end
+            return toneForAdsr[field]
+          end
           pcmEvents[#pcmEvents + 1] = {
             tick = note.start, gate = note.gate,
             key = tonumber(segment.key) or 60,
             vel = tonumber(segment.vel) or 100,
             volume = tonumber(segment.volume) or 100,
             pan = tonumber(segment.pan) or 0x40,
+            attack = pcmAdsr("attack"), decay = pcmAdsr("decay"),
+            sustain = pcmAdsr("sustain"), release = pcmAdsr("release"),
             bank = {
               gba = true, version = pcm.version, sampleId = pcm.sampleId,
               offset = pcm.offset, size = pcm.size, freq = pcm.freq,
