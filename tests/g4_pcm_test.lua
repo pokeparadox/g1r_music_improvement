@@ -156,7 +156,7 @@ assert(converted.def.pcm.loopStartTick == 0
 calls = {}
 local gb = assert(g4Mix.convert("gold", "Music_PalletTown"))
 assert(#calls == 2, "gen2 tracks must build one spec each: " .. tostring(#calls))
-assert(gb.def.converter == "g4_v23_hybrid",
+assert(gb.def.converter == "g4_v26_hybrid",
   "converter version must bump for PCM")
 assert(gb.def.pcm and #gb.def.pcm.events == 1,
   "GB base spec must keep PCM refs")
@@ -182,7 +182,7 @@ do
   local pcmOnly, pcmCalls = capture("pcm")
   assert(pcmOnly.def.g4Mix == true and pcmOnly.def.g4Gb == false,
     "G4 Mix must be PCM-only")
-  assert(pcmOnly.def.converter == "g4_v23_pcm", "G4 Mix converter suffix")
+  assert(pcmOnly.def.converter == "g4_v26_pcm", "G4 Mix converter suffix")
   assert(pcmOnly.def.pcm and #pcmOnly.def.pcm.events == 1,
     "G4 Mix must keep PCM events")
   for _, call in ipairs(pcmCalls) do
@@ -195,7 +195,7 @@ do
   local chipOnly, chipCalls = capture("chip")
   assert(chipOnly.def.g4Gb == true and chipOnly.def.g4Mix == false,
     "G4 GB stays a separate variant")
-  assert(chipOnly.def.converter == "g4_v23_chip", "G4 GB converter suffix")
+  assert(chipOnly.def.converter == "g4_v26_chip", "G4 GB converter suffix")
   assert(chipOnly.def.pcm and #chipOnly.def.pcm.events == 1,
     "G4 GB keeps PCM refs for sampled voices")
   assert(#chipCalls >= 2, "G4 GB must keep every decoded track")
@@ -234,9 +234,9 @@ do
     if hasNote(call.song.trackData[1]) then noteStreams = noteStreams + 1 end
   end
   assert(noteStreams == 1, "split bank only PSG note keeps GB stream")
-  assert(splitBank.def.pcm and #splitBank.def.pcm.events == 1,
-    "split bank sampled note keeps PCM")
-  assert(splitBank.extra.g4_2.pcm == nil, "split bank PSG note has no PCM")
+  assert(splitBank.def.pcm == nil, "promoted PSG note drops sampled PCM")
+  assert(splitBank.extra.g4_1.pcm and #splitBank.extra.g4_1.pcm.events == 1,
+    "split bank sampled note keeps PCM in extra")
 end
 
 print("g4_pcm_test: ok")

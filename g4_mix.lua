@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "g4_v23"
+local CONVERTER_VERSION = "g4_v26"
 local RAW_PREFIX = "G4:"
 local MAX_TRACKS = 16
 local MAX_EVENTS = 20000
@@ -1009,6 +1009,42 @@ end
 
 M.splitDecodedByVoice = splitDecodedByVoice
 
+-- G4 GB splits one SSEQ track into one spec per voice.  SSEQ track order is
+-- not musical order: the high lead often lands in a later spec, while spec 1
+-- is accompaniment.  Pick the melodic voice for the primary engine instead of
+-- blindly promoting track 1.  Mirrors g3_mix.analyzeTrack's lead heuristic
+-- without depending on its private helpers.
+local function chipPrimaryIndex(specTracks, voicegroups)
+  local bestIndex, bestScore = 1, -math.huge
+  for index, track in ipairs(specTracks) do
+    local keySum, noteCount, waveCount = 0, 0, 0
+    for _, event in ipairs(track.events or {}) do
+      if event.kind == "note" then
+        local tone = voicegroups and voicegroups[1] and voicegroups[1][event.voice]
+        local kind = tone and tonumber(tone.type) or 1
+        if kind ~= 4 then
+          keySum = keySum + (tonumber(event.key) or 0)
+          noteCount = noteCount + 1
+          if kind == 3 then waveCount = waveCount + 1 end
+        end
+      end
+    end
+    if noteCount > 0 and noteCount <= 160 then
+      local avgKey = keySum / noteCount
+      if avgKey >= 55 then
+        local score = avgKey - noteCount * 0.02
+        if waveCount * 2 > noteCount then score = score + 12 end
+        if score > bestScore then
+          bestScore, bestIndex = score, index
+        end
+      end
+    end
+  end
+  return bestIndex
+end
+
+M.chipPrimaryIndex = chipPrimaryIndex
+
 -- Premix: g3_mix emits one spec per four tracks and extra_audio has 16 engine
 -- slots.  Only when a song would exceed 16 specs, fold tracks sharing a pan
 -- bucket and instrument voice (duty/wave class) into one M4A track.  All notes
@@ -1318,7 +1354,12 @@ function M.convert(version, label, mode)
       if not ok then return nil, err end
     end
   end
-  local def = specs[1]
+  -- For G4 GB the lead can sit in any voice stream; promote that spec to the
+  -- primary engine so it is not buried behind accompaniment at side-engine
+  -- mix levels.  PCM/hybrid keep original SSEQ track order.
+  local primaryIndex = mode == "chip"
+    and chipPrimaryIndex(specTracks, voicegroups) or 1
+  local def = specs[primaryIndex]
   def.generation = generation
   def.g4Mix = mode ~= "chip"
   def.g4Gb = mode == "chip"
@@ -1330,12 +1371,14 @@ function M.convert(version, label, mode)
   local extra = {}
   for i, spec in ipairs(specs) do
     spec.pcm = specPcms[i]
-    if i > 1 then
+    if i ~= primaryIndex then
       spec.generation = generation
       spec.g4Mix = mode ~= "chip"
       spec.g4Gb = mode == "chip"
       spec.converter = def.converter
       spec.premix = def.premix or nil
+      -- Keep original spec index in the key so promotion only swaps which
+      -- spec is primary; runtime source toggles stay stable.
       extra["g4_" .. i] = spec
     end
   end

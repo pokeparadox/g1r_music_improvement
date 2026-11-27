@@ -927,6 +927,11 @@ T.eq(type(mainSource) == "string"
   true, "G4 candidates enumerate host generation (Gold gets G2 variants)")
 T.eq(type(mainSource) == "string"
   and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.pcm then translated.pcm = def.pcm end",
+    1, true) ~= nil,
+  true, "G4 base specs keep PCM refs through translation")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
     "if g4CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then",
     1, true) ~= nil
   and mainSource:find("group.gen3 or group.gen2 or group.gen1", 1, true) ~= nil,
@@ -945,6 +950,43 @@ T.eq(type(mainSource) == "string"
 T.eq(type(mainSource) == "string"
   and mainSource:find("if spec.pcm then song.pcm = spec.pcm end", 1, true) ~= nil,
   true, "G4 extra songs retain PCM refs for extra_audio")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.gain then translated.gain = def.gain end",
+    1, true) ~= nil
+  and mainSource:find(
+    "if (def.g4Mix or def.g4Gb) and def.pan then translated.pan = def.pan end",
+    1, true) ~= nil,
+  true, "G4 base songs retain spec gain and pan through translation")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("if isG4VariantId(currentSong) then return end", 1, true)
+    ~= nil,
+  true, "G4 extras survive frame stalls so the lead does not disappear")
+T.eq(type(mainSource) == "string"
+  and mainSource:find(
+    "local okExtraImprove, improvedSpec = pcall(improve, spec, settings)",
+    1, true) ~= nil,
+  true, "G4 extra voices get the same hw1 duty lift as the base song")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("G4 harmony started sides=%s active=%s", 1, true) ~= nil
+  and mainSource:find("G4 harmony rendered stage=%d sides=%s peak=%.3f gain=%.2f vol=%.2f fade=%.2f paused=%s rendered=%d stats=%s",
+    1, true) ~= nil
+  and mainSource:find("stats.rawPeak or 0", 1, true) ~= nil
+  and mainSource:find("stats.err or \"-\"", 1, true) ~= nil
+  and mainSource:find("g4PeakStages = { 44100 * 2, 44100 * 25 }", 1, true) ~= nil
+  and mainSource:find("G4 harmony stopped sides=%s peak=%.3f gain=%.2f rendered=%d",
+    1, true) ~= nil,
+  true, "G4 harmony telemetry logs side list, activity, peak and gain")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("local function logG4Harmony(", 1, true) ~= nil
+  and mainSource:find("g4_harmony.log", 1, true) ~= nil,
+  true, "G4 harmony telemetry persists to the mod cache log")
+T.eq(type(mainSource) == "string"
+  and mainSource:find("local enhancementActive = harmonyAllowed()", 1, true) ~= nil
+  and mainSource:find("elseif harmonyAllowed() then", 1, true) ~= nil
+  and mainSource:find("elseif mod.options:get(\"enabled\") ~= false then", 1, true)
+    == nil,
+  true, "jukebox keeps harmony when MUSIC IMPROVEMENTS is off")
 
 -- Gen3 right labels must use the GBA viewport, not the desktop window width.
 local fontKey = "src.ui.game3.frlg_font"

@@ -26,14 +26,28 @@ local events = string.char(0xE1, 120, 0x00, 0xC7, 0x00, 0x81, 0x00)
   .. string.char(0xFF)
 local blob = string.char(0xFE, 0x01, 0x00, 0x93, 0x00) .. u24le(8) .. events
 
-local captured
+-- Two-track fixture: low accompaniment on track 0, high lead on track 1.
+local lowEvents = string.char(0xE1, 120, 0, 0xC7, 0)
+  .. note(45, 48) .. note(48, 48) .. string.char(0xFF)
+local highEvents = string.char(0xE1, 120, 0, 0xC7, 0)
+  .. note(78, 48) .. note(80, 48) .. note(82, 48) .. string.char(0xFF)
+local orderOffset = 13
+local orderBlob = string.char(0xFE, 0x03, 0x00, 0x93, 0x00)
+  .. u24le(orderOffset) .. string.char(0x93, 0x01)
+  .. u24le(orderOffset + #lowEvents) .. lowEvents .. highEvents
+
+local captured, capturedCalls
 local g3Mix = {
   clockAt = realG3.clockAt,
   has = function() return true end,
 }
 function g3Mix.buildSpecs(song, voicegroups, info)
   captured = { song = song, voicegroups = voicegroups, info = info }
-  return realG3.buildSpecs(song, voicegroups, info)
+  local specs = realG3.buildSpecs(song, voicegroups, info)
+  capturedCalls[#capturedCalls + 1] = {
+    song = song, voicegroups = voicegroups, info = info, specs = specs,
+  }
+  return specs
 end
 
 local function def(waveID)
@@ -44,11 +58,17 @@ local function def(waveID)
   } }
 end
 local nds = {
-  status = function() return { available = true, songCount = 1 } end,
+  status = function() return { available = true, songCount = 2 } end,
   listSongs = function()
-    return { { name = "SEQ_GS_LEAD", index = 1, bank = 0, player = 1 } }
+    return {
+      { name = "SEQ_GS_LEAD", index = 1, bank = 0, player = 1 },
+      { name = "SEQ_GS_LEAD_ORDER", index = 2, bank = 0, player = 1 },
+    }
   end,
-  readSequence = function()
+  readSequence = function(song)
+    if song.name == "SEQ_GS_LEAD_ORDER" then
+      return { data = orderBlob, base = 0, start = 0, size = #orderBlob }
+    end
     return { data = blob, base = 0, start = 0, size = #blob }
   end,
   readBank = function()
@@ -63,8 +83,14 @@ local nds = {
 }
 local songMap
 songMap = {
-  BY_NAME = { SEQ_GS_LEAD = "Music_G4LeadTest" },
-  BY_KEY = { Music_G4LeadTest = { "SEQ_GS_LEAD" } },
+  BY_NAME = {
+    SEQ_GS_LEAD = "Music_G4LeadTest",
+    SEQ_GS_LEAD_ORDER = "Music_G4OrderTest",
+  },
+  BY_KEY = {
+    Music_G4LeadTest = { "SEQ_GS_LEAD" },
+    Music_G4OrderTest = { "SEQ_GS_LEAD_ORDER" },
+  },
   keyFor = function(name) return songMap.BY_NAME[name] end,
   namesFor = function(key) return songMap.BY_KEY[key] or {} end,
 }
@@ -72,9 +98,10 @@ songMap = {
 assert(g4Mix.install({ g3Mix = g3Mix, nds = nds, songMap = songMap,
   versions = versions }) == true)
 
+capturedCalls = {}
 local gold, err = g4Mix.convert("gold", "Music_G4LeadTest")
 assert(gold, err)
-assert(gold.def.converter == "g4_v23_hybrid",
+assert(gold.def.converter == "g4_v26_hybrid",
   "converter version must change for gen2 lead fallback: "
     .. tostring(gold.def.converter))
 assert(captured.voicegroups[1][1].leadDuty == 2,
@@ -92,6 +119,34 @@ for _, spec in ipairs(g3Mix.buildSpecs(captured.song, captured.voicegroups,
   end
 end
 assert(hasDuty, "gen2 fallback must emit duty actions")
+
+local improve = require("improve")
+local lifted = improve.improve({
+  channels = { { hw = 1, program = { { duty = 1, volume = 14 } } } },
+}, { enabled = true })
+assert(lifted.channels[1].program[1].duty == 2,
+  "G4 extra voices must get the base hw1 duty lift")
+
+capturedCalls = {}
+local ordered, orderErr = g4Mix.convert("gold", "Music_G4OrderTest", "chip")
+assert(ordered, orderErr)
+assert(ordered.def.converter == "g4_v26_chip", "G4 GB lead promotion converter")
+local promoted
+for _, call in ipairs(capturedCalls) do
+  for _, spec in ipairs(call.specs or {}) do
+    if spec == ordered.def then promoted = call break end
+  end
+  if promoted then break end
+end
+assert(promoted, "promoted lead spec must come from a decoded voice track")
+local promotedKeys = {}
+for _, event in ipairs(realG3.decodeTrack(promoted.song.trackData[1]).events) do
+  if event.kind == "note" then
+    promotedKeys[#promotedKeys + 1] = event.key
+  end
+end
+assert(#promotedKeys == 3, "promoted lead must keep its note stream")
+assert(promotedKeys[1] >= 70, "high lead voice must become primary spec")
 
 local firered, err = g4Mix.convert("firered", "Music_G4LeadTest")
 assert(firered, err)

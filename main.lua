@@ -204,11 +204,25 @@ return function(mod)
   local function registerSpec(def, settings, id, extra)
     local translated = translate(def, settings)
     if not translated then return nil end
+    -- ChipAsm drops unknown spec fields; base G4 songs need their PCM refs
+    -- and mix levels too, not just the extra specs wired below.
+    if (def.g4Mix or def.g4Gb) and def.pcm then translated.pcm = def.pcm end
+    if (def.g4Mix or def.g4Gb) and def.gain then translated.gain = def.gain end
+    if (def.g4Mix or def.g4Gb) and def.pan then translated.pan = def.pan end
     translated.generation = 1
     if extra then
       local extraSong = {}
       for side, spec in pairs(extra) do
-        local okSong, song = pcall(ChipAsm.song, spec)
+        local sourceSpec = spec
+        if def.g4Mix or def.g4Gb then
+          -- G4 split voices bypass the normal improve pass; lift their duty
+          -- too, or the lead extra stays a thin 12.5% pulse under the base.
+          local okExtraImprove, improvedSpec = pcall(improve, spec, settings)
+          if okExtraImprove and type(improvedSpec) == "table" then
+            sourceSpec = improvedSpec
+          end
+        end
+        local okSong, song = pcall(ChipAsm.song, sourceSpec)
         if okSong and type(song) == "table" and type(song.chip) == "table" then
           song.generation = 1
           if spec.pan then song.pan = spec.pan end
@@ -2568,6 +2582,25 @@ return function(mod)
   local pendingExtra
   local pendingLooping = true
   local suppressExtra = false
+  local g4HarmonyLogged = false
+  local g4PeakStage = 0
+  local g4PeakStages = { 44100 * 2, 44100 * 25 }
+  local function logG4Harmony(format, ...)
+    local line = string.format("music_improvement: " .. format, ...)
+    mod.log:info("%s", line)
+    if not mod.cache or type(mod.cache.read) ~= "function"
+        or type(mod.cache.write) ~= "function" then return end
+    local okRead, previous = pcall(mod.cache.read, mod.cache, "g4_harmony.log")
+    if not okRead or type(previous) ~= "string" then previous = "" end
+    if #previous > 65536 then previous = previous:sub(-32768) end
+    if #previous > 0 and previous:sub(-1) ~= "\n" then previous = previous .. "\n" end
+    pcall(mod.cache.write, mod.cache, "g4_harmony.log",
+      previous .. line .. "\n")
+  end
+  local function harmonyAllowed()
+    return (mod.options:get("enabled") ~= false or currentReason == "jukebox")
+      and not state.skipped and not suppressExtra
+  end
   local cpuEma = 0
   local cpuOverSince = nil
   local guardIgnoreUntil = 0
@@ -2594,6 +2627,10 @@ return function(mod)
     else
       cpuOverSince = nil
     end
+    -- G4 splits one SSEQ across specs; the melodic voice can live in an extra
+    -- engine. Stopping extras for a stall would leave only backing audible.
+    -- extra_audio already resyncs drift on its own.
+    if isG4VariantId(currentSong) then return end
     if over and (dt > 0.5 or now - cpuOverSince >= 1.0) then
       suppressExtra = true
       cpuOverSince = nil
@@ -2647,14 +2684,14 @@ return function(mod)
     currentReason = payload and payload.reason
     currentImproved = (type(song) == "string" and song:match("^Music_Improved") ~= nil)
     suppressExtra = false
+    g4HarmonyLogged = false
+    g4PeakStage = 0
     cpuEma = 0
     cpuOverSince = nil
     if extraAudio then
       pcall(extraAudio.stop)
       local extra = song and extraDefs[song]
-      local enhancementActive = (mod.options:get("enabled") ~= false
-          or currentReason == "jukebox")
-        and not state.skipped and not suppressExtra
+      local enhancementActive = harmonyAllowed()
       if extra and enhancementActive then
         pendingLooping = currentReason ~= "once"
         guardIgnoreUntil = g1rClock() + 2
@@ -2677,6 +2714,11 @@ return function(mod)
         end
       else
         pendingExtra = nil
+      end
+      if isG4VariantId(song) and extraAudio.telemetry then
+        local t = extraAudio.telemetry()
+        logG4Harmony("G4 harmony started sides=%s active=%s",
+          table.concat(t.sides or {}, ","), tostring(t.active))
       end
     end
     pcall(applyChannelMix)
@@ -2823,7 +2865,7 @@ return function(mod)
         if suppressExtra then
           pendingExtra = nil
           if extraAudio.isActive() then pcall(extraAudio.stop) end
-        elseif mod.options:get("enabled") ~= false then
+        elseif harmonyAllowed() then
           pcall(extraAudio.setExtraMix, mod.options:get("extra_mix"))
           if pendingExtra and okChipAudio and type(ChipAudio.currentSource) == "function" then
             local okSource, source = pcall(ChipAudio.currentSource)
@@ -2833,6 +2875,38 @@ return function(mod)
             end
           end
           pcall(extraAudio.update)
+          if isG4VariantId(currentSong) and extraAudio.telemetry then
+            local t = extraAudio.telemetry()
+            if t then
+              if g4PeakStage < #g4PeakStages
+                  and (t.rendered or 0) >= g4PeakStages[g4PeakStage + 1] then
+                g4PeakStage = g4PeakStage + 1
+                local details = {}
+                for _, side in ipairs(t.sides or {}) do
+                  local stats = t.sideStats and t.sideStats[side]
+                  if stats then
+                    details[#details + 1] = string.format(
+                      "%s:ok=%s,raw=%.3f,g=%.2f,dyn=%.2f,err=%s", side,
+                      tostring(stats.ok), stats.rawPeak or 0,
+                      stats.gain or 0, stats.dynGain or 0,
+                      stats.err or "-")
+                  end
+                end
+                logG4Harmony(
+                  "G4 harmony rendered stage=%d sides=%s peak=%.3f gain=%.2f vol=%.2f fade=%.2f paused=%s rendered=%d stats=%s",
+                  g4PeakStage, table.concat(t.sides or {}, ","), t.peak or 0,
+                  t.extraGain or 0, t.musicVolume or 0, t.fadeScale or 0,
+                  tostring(t.paused), t.rendered, table.concat(details, " "))
+              end
+              if t.givenUp and not g4HarmonyLogged then
+                g4HarmonyLogged = true
+                logG4Harmony(
+                  "G4 harmony stopped sides=%s peak=%.3f gain=%.2f rendered=%d",
+                  table.concat(t.sides or {}, ","), t.peak or 0,
+                  t.extraGain or 0, t.rendered or 0)
+              end
+            end
+          end
         else
           pendingExtra = nil
           pcall(extraAudio.stop)

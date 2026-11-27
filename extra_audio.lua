@@ -48,6 +48,8 @@ return function()
     resyncCount = 0,
     resyncSince = 0,
     givenUp = false,
+    peak = 0,
+    sideStats = {},
     profile = "gb",
     maxEngines = nil,
   }
@@ -352,6 +354,8 @@ return function()
     state.resyncCount = 0
     state.resyncSince = 0
     state.givenUp = false
+    state.peak = 0
+    state.sideStats = {}
   end
 
   local function currentBaseSource()
@@ -415,8 +419,10 @@ return function()
       local rightGain = 0.5 + 0.25 * (1 + pan)
       local songGain = state.gains[side] or 1
       local gain = state.extraGain * state.musicVolume * dynGain * songGain
-      local okSd, sd = engine and pcall(ChipSynth.soundData, engine, chunk, 1)
-        or false, nil
+      local rawPeak = 0
+      local okSd, sdOrErr = false, nil
+      if engine then okSd, sdOrErr = pcall(ChipSynth.soundData, engine, chunk, 1) end
+      local sd = okSd and sdOrErr or nil
       if okSd and sd and dynGain > 0 then
         local ptr = nil
         if ChipSynth._int16Pointer then
@@ -431,6 +437,8 @@ return function()
             local okSample, v = pcall(sd.getSample, sd, i)
             if okSample then sample = v or 0 end
           end
+          local magnitude = math.abs(sample)
+          if magnitude > rawPeak then rawPeak = magnitude end
           leftMix[i] = leftMix[i] + sample * gain * leftGain
           rightMix[i] = rightMix[i] + sample * gain * rightGain
         end
@@ -439,6 +447,13 @@ return function()
       if pcm and dynGain > 0 then
         pcmRender(pcm, leftMix, rightMix, chunkStart, chunk, gain)
       end
+      state.sideStats[side] = {
+        ok = okSd and sd ~= nil,
+        rawPeak = rawPeak,
+        gain = gain,
+        dynGain = dynGain,
+        err = okSd and nil or tostring(sdOrErr):sub(1, 160),
+      }
     end
 
     local channels = state.channels or 2
@@ -453,6 +468,9 @@ return function()
       local fr = rightMix[i]
       if fl > 1 then fl = 1 elseif fl < -1 then fl = -1 end
       if fr > 1 then fr = 1 elseif fr < -1 then fr = -1 end
+      local peak = math.abs(fl)
+      if math.abs(fr) > peak then peak = math.abs(fr) end
+      if peak > state.peak then state.peak = peak end
       if channels >= 6 then
         local center = (fl + fr) * 0.5
         local rearL = fl * 0.9
@@ -715,11 +733,29 @@ return function()
     return state.source ~= nil and not state.givenUp
   end
 
+  local function telemetry()
+    local sides = {}
+    for _, side in ipairs(engineKeys()) do sides[#sides + 1] = tostring(side) end
+    return {
+      active = isActive(),
+      givenUp = state.givenUp,
+      sides = sides,
+      peak = state.peak or 0,
+      rendered = state.extraRendered or 0,
+      extraGain = state.extraGain,
+      sideStats = state.sideStats,
+      musicVolume = state.musicVolume,
+      fadeScale = state.fadeScale,
+      paused = state.paused,
+    }
+  end
+
   return {
     start = start,
     stop = stop,
     update = update,
     isActive = isActive,
+    telemetry = telemetry,
     setExtraGain = setExtraGain,
     setExtraMix = setExtraMix,
     setSideEnabled = setSideEnabled,

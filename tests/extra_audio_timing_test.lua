@@ -106,6 +106,15 @@ now = 91
 preparedAudio.update()
 eq(preparedSource.playing, true, "prepared harmony starts with the base")
 eq(preparedEngine.samples, 8192, "starting with base does not skip the lead")
+local telemetry = preparedAudio.telemetry()
+eq(telemetry.sides[1], "left", "telemetry lists active side engines")
+eq(telemetry.active, true, "telemetry reports the active harmony source")
+check(telemetry.peak >= 0, "telemetry reports a rendered peak")
+check(type(telemetry.sideStats) == "table", "telemetry reports per-side stats")
+for _, stats in pairs(telemetry.sideStats) do
+  check(stats.rawPeak >= 0, "per-side stats include raw peak")
+  check(type(stats.err) == "string", "per-side stats include soundData error")
+end
 preparedAudio.stop()
 
 -- A paused base source must not accrue the pause duration as elapsed audio.
