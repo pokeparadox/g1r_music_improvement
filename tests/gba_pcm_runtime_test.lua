@@ -87,6 +87,8 @@ check(gen3:find("pcall(deps.extraAudio.update)", 1, true),
   "gen3.lua must pump the injected GBA extra engine")
 check(main:find("byte >= 128 then byte = byte - 256 end", 1, true),
   "GBA s8 samples must stay sign-extended")
+check(main:find("string.char(0, byte % 256)", 1, true),
+  "GBA s8->s16 must scale by 256 (raw byte in high byte)")
 check(main:find("/ 16384) % 2 == 1", 1, true),
   "GBA loop detection must use the 0x4000 flag bit")
 

@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 9
+local CONVERTER_VERSION = 10
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -553,7 +553,7 @@ local function toneInfo(voicegroups, vgId, note, specWaves, samples, version)
       noteKey = math.max(0, math.min(178, math.floor(noteKey or 60)))
       local rateHz = fixed and GBA_MIX_RATE
         or midiKeyToFreq(meta.freq, noteKey, note.fine or 0)
-      if rateHz >= 1000 then
+      if rateHz > 0 then
         local pcmTone = copyTable(tone)
         pcmTone.pcm = {
           version = version, sampleId = tone.sampleId,

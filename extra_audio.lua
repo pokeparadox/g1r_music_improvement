@@ -122,9 +122,9 @@ return function()
   -- ticks to output samples so PCM voices stay locked to chip events.
   local MAX_PCM_VOICES = 16
   -- PCM is rendered on the same bus as the extra chip voices; full-level GBA
-  -- samples mask the chip layer. Keep samples under the chip by default.
+  -- Match other extra layers before pan/envelope; baseGain still applies.
   -- ponytail: fixed ceiling, add a profile knob only if FR sample level needs tuning.
-  local PCM_GAIN = 0.6
+  local PCM_GAIN = 1.0
   -- MP2K DS envelopes advance once per GBA VBlank; extraAudio renders at
   -- ChipSynth's rate, so convert that frame tick to output samples.
   local GBA_FRAME_SAMPLES = SAMPLE_RATE * 280896 / 16777216
@@ -232,6 +232,7 @@ return function()
       timeline = copy
     end
     local events, samples = {}, {}
+    local ready, missing = 0, 0
     for _, event in ipairs(pcm.events) do
       local gba = type(event.bank) == "table" and event.bank.gba
       local key = gba
@@ -254,6 +255,7 @@ return function()
         samples[key] = sample
       end
       if sample then
+        ready = ready + 1
         local at = pcmTickToSample(timeline, event.tick)
         local gateEnd = pcmTickToSample(timeline, event.tick + (event.gate or 1))
         local hasAdsr = false
@@ -279,6 +281,8 @@ return function()
           sustain = pcmAdsrValue(event, "sustain", defaults.sustain),
           release = pcmAdsrValue(event, "release", defaults.release),
         }
+      else
+        missing = missing + 1
       end
     end
     if #events == 0 then return nil end
@@ -286,6 +290,10 @@ return function()
     local built = {
       events = events, active = {}, pos = 0, nextEvent = 1, cycle = 0,
       looping = true,
+      stats = {
+        events = #events, ready = ready, missing = missing,
+        active = 0, peak = 0,
+      },
     }
     local loopStartTick = tonumber(pcm.loopStartTick) or 0
     local loopEndTick = tonumber(pcm.loopEndTick)
@@ -311,6 +319,7 @@ return function()
     if not pcm or #pcm.active == 0 and pcm.nextEvent > #pcm.events
         and pcm.loopSamples == 0 then return end
     local last = start + count
+    local peak = 0
     while true do
       local event = pcm.events[pcm.nextEvent]
       if not event and pcm.loopSamples > 0 then
@@ -399,12 +408,17 @@ return function()
           local amplified = value * env * voice.gain
           mixedL = mixedL + amplified * voice.leftGain
           mixedR = mixedR + amplified * voice.rightGain
+          peak = math.max(peak, math.abs(mixedL), math.abs(mixedR))
         end
       end
       leftMix[i] = leftMix[i] + mixedL
       rightMix[i] = rightMix[i] + mixedR
     end
     pcm.pos = last
+    if pcm.stats then
+      pcm.stats.active = #pcm.active
+      pcm.stats.peak = math.max(pcm.stats.peak or 0, peak)
+    end
   end
 
   local function isPlaying(src)
@@ -534,6 +548,16 @@ return function()
         dynGain = dynGain,
         err = okSd and nil or tostring(sdOrErr):sub(1, 160),
       }
+      if pcm then
+        local stats = pcm.stats or {}
+        state.sideStats[side].pcm = {
+          events = stats.events or #pcm.events,
+          ready = stats.ready or 0,
+          missing = stats.missing or 0,
+          active = stats.active or #pcm.active,
+          peak = stats.peak or 0,
+        }
+      end
     end
 
     local channels = state.channels or 2
@@ -814,8 +838,18 @@ return function()
   end
 
   local function telemetry()
-    local sides = {}
+    local sides, pcms = {}, {}
     for _, side in ipairs(engineKeys()) do sides[#sides + 1] = tostring(side) end
+    for side, pcm in pairs(state.pcms) do
+      local stats = pcm.stats or {}
+      pcms[tostring(side)] = {
+        events = stats.events or #pcm.events,
+        ready = stats.ready or 0,
+        missing = stats.missing or 0,
+        active = stats.active or #pcm.active,
+        peak = stats.peak or 0,
+      }
+    end
     return {
       active = isActive(),
       givenUp = state.givenUp,
@@ -824,6 +858,7 @@ return function()
       rendered = state.extraRendered or 0,
       extraGain = state.extraGain,
       sideStats = state.sideStats,
+      pcm = pcms,
       musicVolume = state.musicVolume,
       fadeScale = state.fadeScale,
       paused = state.paused,

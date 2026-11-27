@@ -104,8 +104,7 @@ do
 end
 
 do
-  -- GBA samples share the bus with chip voices: duck PCM so the chip layer
-  -- stays audible instead of being masked by full-scale DirectSound data.
+  -- PCM_GAIN=1.0 matches other extra layers; caller applies baseGain.
   local fullSample = {
     data = string.rep(string.char(0xFF, 0x7F), 20), sampleRate = 44100,
   }
@@ -126,8 +125,8 @@ do
   internals.pcmRender(built, left, right, 0, 1600, 1)
   local peak = 0
   for frame = 0, 1599 do peak = math.max(peak, math.abs(left[frame] or 0)) end
-  check(peak > 0.25, "PCM duck rendered silence: " .. tostring(peak))
-  check(peak <= 0.61, "PCM must stay under full chip gain: " .. tostring(peak))
+  check(peak > 0.5, "PCM rendered silence: " .. tostring(peak))
+  check(peak <= 0.8, "PCM too hot: " .. tostring(peak))
 end
 
 do
@@ -155,9 +154,9 @@ do
   internals.pcmRender(built, left, right, 0, 1600, 1)
   local peak = 0
   for frame = 0, 1599 do peak = math.max(peak, math.abs(left[frame] or 0)) end
-  -- Center pan contributes 0.75 per side, so a 1.4 lead boost peaks ~0.5.
-  check(peak > 0.45, "PCM lead boost missing: " .. tostring(peak))
-  check(peak <= 0.65, "PCM lead boost too high: " .. tostring(peak))
+  -- Center pan contributes 0.75 per side, so a 1.4 lead boost peaks ~0.83.
+  check(peak > 0.7, "PCM lead boost missing: " .. tostring(peak))
+  check(peak <= 0.95, "PCM lead boost too high: " .. tostring(peak))
 end
 
 do

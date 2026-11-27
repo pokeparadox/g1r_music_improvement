@@ -71,4 +71,22 @@ eq(drum.decay, 4, "drum kit decay copied")
 eq(drum.sustain, 7, "drum kit sustain copied")
 eq(drum.release, 3, "drum kit release copied")
 
+-- Low bass on a 6000 Hz sample: native DS pitch uses the note key directly,
+-- ignoring tone.key. samples.lua sampleId is 1-based; no +1 adjustment.
+local lowTrack = string.char(0xBD, 0x01, 0xD3, 24, 100, 0xB1)
+local lowSamples = {
+  [11] = { id = 11, freq = 6000 * 1024, offset = 0, size = 80,
+    loopStart = 0, status = 0 },
+}
+local lowGroups = { [1] = { [1] = { type = 0, key = 72, sampleId = 11 } } }
+local lowSong = { tracks = 1, trackData = { lowTrack }, voicegroup = 1 }
+local lowSpecs = mix.buildSpecs(lowSong, lowGroups,
+  { voicegroupId = 1, samples = lowSamples, version = "firered" })
+assert(lowSpecs and lowSpecs[2] and lowSpecs[2].pcm, "low-rate sample kept")
+local lowEvent = lowSpecs[2].pcm.events[1]
+eq(lowEvent.bank.sampleId, 11, "1-based sample id unchanged")
+eq(lowEvent.key, 24, "native pitch ignores tone.key")
+assert(lowEvent.rateHz > 0 and lowEvent.rateHz < 1000,
+  "low-rate sample rejected: " .. tostring(lowEvent.rateHz))
+
 print("g3_pcm_test: ok")

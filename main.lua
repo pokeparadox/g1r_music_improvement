@@ -111,7 +111,8 @@ return function(mod)
     for i = 1, #blob do
       local byte = blob:byte(i)
       if byte >= 128 then byte = byte - 256 end
-      pcm[i] = string.char(byte % 256, byte >= 0 and 255 or 0)
+      -- s8 -> s16 LE: scale by 256. High byte is the raw signed byte.
+      pcm[i] = string.char(0, byte % 256)
     end
     local loopStart = tonumber(source.loopStart) or 0
     local size = tonumber(source.size) or 0
@@ -2612,17 +2613,35 @@ return function(mod)
   local g4HarmonyLogged = false
   local g4PeakStage = 0
   local g4PeakStages = { 44100 * 2, 44100 * 25 }
-  local function logG4Harmony(format, ...)
+  local g3HarmonyLogged = false
+  local g3PeakStage = 0
+  local g3PeakStages = { 44100 * 2, 44100 * 25 }
+  local function logHarmony(file, format, ...)
     local line = string.format("music_improvement: " .. format, ...)
     mod.log:info("%s", line)
     if not mod.cache or type(mod.cache.read) ~= "function"
         or type(mod.cache.write) ~= "function" then return end
-    local okRead, previous = pcall(mod.cache.read, mod.cache, "g4_harmony.log")
+    local okRead, previous = pcall(mod.cache.read, mod.cache, file)
     if not okRead or type(previous) ~= "string" then previous = "" end
     if #previous > 65536 then previous = previous:sub(-32768) end
     if #previous > 0 and previous:sub(-1) ~= "\n" then previous = previous .. "\n" end
-    pcall(mod.cache.write, mod.cache, "g4_harmony.log",
-      previous .. line .. "\n")
+    pcall(mod.cache.write, mod.cache, file, previous .. line .. "\n")
+  end
+  local function logG4Harmony(format, ...)
+    logHarmony("g4_harmony.log", format, ...)
+  end
+  local function logG3Harmony(format, ...)
+    logHarmony("g3_harmony.log", format, ...)
+  end
+  local function pcmTelemetry(t)
+    local parts = {}
+    for side, stats in pairs(t and t.pcm or {}) do
+      parts[#parts + 1] = string.format(
+        "%s:ev=%d,ready=%d,miss=%d,act=%d,peak=%.3f", side,
+        stats.events or 0, stats.ready or 0, stats.missing or 0,
+        stats.active or 0, stats.peak or 0)
+    end
+    return table.concat(parts, " ")
   end
   local function harmonyAllowed()
     return (mod.options:get("enabled") ~= false or currentReason == "jukebox")
@@ -2717,6 +2736,8 @@ return function(mod)
     suppressExtra = false
     g4HarmonyLogged = false
     g4PeakStage = 0
+    g3HarmonyLogged = false
+    g3PeakStage = 0
     cpuEma = 0
     cpuOverSince = nil
     if extraAudio then
@@ -2750,6 +2771,15 @@ return function(mod)
         local t = extraAudio.telemetry()
         logG4Harmony("G4 harmony started sides=%s active=%s",
           table.concat(t.sides or {}, ","), tostring(t.active))
+      end
+      if gbaExtraAudio and gbaExtraAudio.telemetry then
+        local t = gbaExtraAudio.telemetry()
+        if t then
+          logG3Harmony(
+            "G3 harmony started id=%s sides=%s active=%s pcm=%s",
+            tostring(song), table.concat(t.sides or {}, ","),
+            tostring(t.active), pcmTelemetry(t))
+        end
       end
     end
     pcall(applyChannelMix)
@@ -2941,6 +2971,27 @@ return function(mod)
         else
           pendingExtra = nil
           pcall(extraAudio.stop)
+        end
+      end
+      if hostIsGen3(self) and gbaExtraAudio and gbaExtraAudio.telemetry then
+        local t = gbaExtraAudio.telemetry()
+        if t then
+          if g3PeakStage < #g3PeakStages
+              and (t.rendered or 0) >= g3PeakStages[g3PeakStage + 1] then
+            g3PeakStage = g3PeakStage + 1
+            logG3Harmony(
+              "G3 harmony rendered stage=%d sides=%s peak=%.3f gain=%.2f vol=%.2f fade=%.2f paused=%s rendered=%d pcm=%s",
+              g3PeakStage, table.concat(t.sides or {}, ","), t.peak or 0,
+              t.extraGain or 0, t.musicVolume or 0, t.fadeScale or 0,
+              tostring(t.paused), t.rendered or 0, pcmTelemetry(t))
+          end
+          if t.givenUp and not g3HarmonyLogged then
+            g3HarmonyLogged = true
+            logG3Harmony(
+              "G3 harmony stopped sides=%s peak=%.3f gain=%.2f rendered=%d pcm=%s",
+              table.concat(t.sides or {}, ","), t.peak or 0,
+              t.extraGain or 0, t.rendered or 0, pcmTelemetry(t))
+          end
         end
       end
       return result
