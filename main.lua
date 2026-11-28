@@ -26,44 +26,21 @@ return function(mod)
   end
   if isSongData(Data) then liveData = Data end
 
-  local function appendN64LoadDiag(line)
-    if not (mod.cache and type(mod.cache.write) == "function") then return end
-    local previous = ""
-    if type(mod.cache.read) == "function" then
-      local ok, value = pcall(mod.cache.read, mod.cache, "n64_load.log")
-      if ok and type(value) == "string" then previous = value end
-    end
-    pcall(function()
-      mod.cache:write("n64_load.log", previous .. line .. "\n")
-    end)
-  end
   local function loadModFile(name)
     local source = mod:read(name)
     if not source then
       mod.log:error("%s missing from %s -- reinstall the mod", name, mod.path)
-      if name:match("^n64") then
-        appendN64LoadDiag(name .. " read=nil path=" .. tostring(mod.path))
-      end
       return nil
     end
     local chunk, compileErr = load(source, "@" .. mod.path .. "/" .. name)
     if not chunk then
       mod.log:error("%s did not compile: %s", name, tostring(compileErr))
-      if name:match("^n64") then
-        appendN64LoadDiag(name .. " compile=" .. tostring(compileErr))
-      end
       return nil
     end
     local ok, result = pcall(chunk)
     if not ok then
       mod.log:error("%s failed to assemble: %s", name, tostring(result))
-      if name:match("^n64") then
-        appendN64LoadDiag(name .. " run=" .. tostring(result))
-      end
       return nil
-    end
-    if name:match("^n64") then
-      appendN64LoadDiag(name .. " ok type=" .. type(result) .. " bytes=" .. #source)
     end
     return result
   end
@@ -125,20 +102,6 @@ return function(mod)
   end
   local n64ImportErrorLogged = false
   local n64MismatchLogged = false
-  local n64MusicTestLogged = false
-  local n64MusicTestEntryLogged = false
-  local n64MusicTestOpenLogged = false
-  local function writeN64Diag(filename, line)
-    mod.log:warn("%s", line)
-    if mod.cache and type(mod.cache.write) == "function" then
-      local ok, err = pcall(function() mod.cache:write(filename, line .. "\n") end)
-      if not ok then
-        mod.log:warn("music_improvement: N64 diagnostic write failed: %s", tostring(err))
-      end
-    else
-      mod.log:warn("music_improvement: N64 diagnostic cache unavailable")
-    end
-  end
   local function n64ImportReady()
     local st = n64Import and n64Import.status and n64Import.status()
     local ready = st and st.available == true
@@ -2470,19 +2433,6 @@ return function(mod)
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGen = GameVersion.generation(hostVersion) or hostGen
     end
-    if not n64MusicTestEntryLogged then
-      n64MusicTestEntryLogged = true
-      local st = n64Import and n64Import.status and n64Import.status() or {}
-      local songs = n64Mix and n64Mix.listSongs and n64Mix.listSongs() or {}
-      local names = {}
-      for i = 1, math.min(3, #songs) do
-        names[#names + 1] = tostring(songs[i].name or songs[i])
-      end
-      writeN64Diag("n64_menu_entry.log", string.format(
-        "music_improvement: N64 jukebox entry hostGen=%d game=%s ready=%s module=%s songs=%d first=%s available=%s error=%s",
-        hostGen, tostring(hostVersion), tostring(n64ImportReady()), tostring(n64Mix ~= nil),
-        #songs, table.concat(names, ","), tostring(st.available == true), tostring(st.error or "")))
-    end
     local entries, seen = {}, {}
     local function baseImprovedVariant(id, generation)
       local baseId = improvedIdFor(id)
@@ -2705,19 +2655,6 @@ return function(mod)
     end
     if n64ImportReady() then
       local songs = n64Mix and n64Mix.listSongs and n64Mix.listSongs() or {}
-      if not n64MusicTestLogged then
-        n64MusicTestLogged = true
-        local names = {}
-        for i = 1, math.min(3, #songs) do
-          names[#names + 1] = tostring(songs[i].name or songs[i])
-        end
-        local st = n64Import and n64Import.status and n64Import.status() or {}
-        local line = string.format(
-          "music_improvement: N64 jukebox module=%s songs=%d first=%s available=%s error=%s",
-          tostring(n64Mix ~= nil), #songs, table.concat(names, ","),
-          tostring(st.available == true), tostring(st.error or ""))
-        writeN64Diag("n64_menu.log", line)
-      end
       local songIds = hostGen == 3 and gen3SongIds(game) or nil
       local carrierId = songIds and next(songIds) and songIds[next(songIds)] or nil
       for _, song in ipairs(songs) do
@@ -2820,13 +2757,6 @@ return function(mod)
 
   openGen3Jukebox = function(game)
     local ui = gen3Ui()
-    if not n64MusicTestOpenLogged then
-      n64MusicTestOpenLogged = true
-      writeN64Diag("n64_menu_open.log", string.format(
-        "music_improvement: N64 jukebox open ui=%s game=%s hostGen=%s ready=%s",
-        tostring(ui ~= nil), tostring(cacheGameId(game or readyGame)),
-        tostring(hostGen), tostring(n64ImportReady())))
-    end
     if not ui then return false end
     local items = musicTestItems(musicTestEntries(game))
     if #items == 0 then

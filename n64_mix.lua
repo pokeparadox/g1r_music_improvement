@@ -5,7 +5,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = "n64_v2_pcm"
+local CONVERTER_VERSION = "n64_v3_pcm"
 
 local SEQ_LEN = {
   [0x60] = 2, [0x90] = 2, [0xA0] = 2, [0xB0] = 3, [0xC1] = 1,
@@ -61,13 +61,18 @@ local function timeValue(data, pos, limit)
 end
 
 local function freshChannel()
-  return { instrument = 0, pan = 0x40, volume = 0x7F, coarse = 0, started = false }
+  return {
+    instrument = 0, pan = 0x40, volume = 0x7F, coarse = 0, started = false,
+    velocity = 0x7F, gateTime = 0x80, shortDelay = 0, lastDelay = 0,
+  }
 end
 
 local function copyState(state)
   return {
     instrument = state.instrument, pan = state.pan, volume = state.volume,
-    coarse = state.coarse, started = state.started,
+    coarse = state.coarse, started = state.started, velocity = state.velocity,
+    gateTime = state.gateTime, shortDelay = state.shortDelay,
+    lastDelay = state.lastDelay,
   }
 end
 
@@ -77,10 +82,11 @@ local function clamp(value, low, high)
   return value
 end
 
-local function addNote(out, tick, duration, note, velocity, channel, state)
+local function addNote(out, tick, duration, note, velocity, channel, state, drumIndex)
   if #out >= 8192 then return end
   out[#out + 1] = {
     tick = tick, gate = math.max(1, duration), note = clamp(note, 0, 127),
+    drum = clamp(drumIndex or 0, 0, 127),
     vel = clamp(velocity, 0, 127), channel = channel,
     instrument = state.instrument, pan = state.pan, volume = state.volume,
   }
@@ -90,7 +96,6 @@ local function parseLayer(ctx, data, offset, limit, channel, state, out, tickSta
   if depth > 8 or #out >= 8192 then return end
   local seen = {}
   local pos = offset
-  local lastTimestamp = 0
   local guard = 0
   while pos <= limit and guard < 16384 do
     guard = guard + 1
@@ -98,58 +103,74 @@ local function parseLayer(ctx, data, offset, limit, channel, state, out, tickSta
     if seen[mark] then return end
     seen[mark] = true
     local command = byte(data, pos)
-    if command == nil or command == 0xFF or command == 0xFE then return end
-    if command == 0xC0 or command == 0xFD then
+    if command == nil or command == 0xFF then return end
+    if command == 0xFE then
+      -- DELAY1: wait one tick, continue.
+      tickState.tick = tickState.tick + 1
+      pos = pos + 1
+    elseif command == 0xC0 or command == 0xFD then
       local delta, nextPos = timeValue(data, pos + 1, limit)
       pos = nextPos
-      if command == 0xC0 then
-        tickState.tick = tickState.tick + delta
-        lastTimestamp = delta
-      end
+      tickState.tick = tickState.tick + delta
     elseif command == 0xFC then
       local target = u16(data, pos + 1)
       if not target then return end
       -- EAD offsets are 0-based; Lua strings are 1-based.
       parseLayer(ctx, data, target + 1, limit, channel, state, out, tickState, depth + 1)
       return
+    elseif command == 0xC1 then
+      state.velocity = byte(data, pos + 1) or state.velocity
+      pos = pos + 2
     elseif command == 0xC2 then
       local value = byte(data, pos + 1) or 0
       state.coarse = value >= 0x80 and value - 256 or value
       pos = pos + 1 + (LAYER_LEN[command] or 0)
+    elseif command == 0xC3 then
+      state.shortDelay, pos = timeValue(data, pos + 1, limit)
+    elseif command == 0xC9 then
+      state.gateTime = byte(data, pos + 1) or 0
+      pos = pos + 2
+    elseif command == 0xCA then
+      state.pan = byte(data, pos + 1) or state.pan
+      pos = pos + 2
     elseif command < 0xC0 then
+      local noteClass = command % 0xC0
       local rawNote = command % 0x40
       local note = rawNote + state.coarse + 0x15
-      local delta, nextPos = timeValue(data, pos + 1, limit)
-      pos = nextPos
-      local velocity, duration
-      local skipTail = false
-      if not state.started then
-        velocity, duration = 0x7F, delta
-        -- Source reads the next byte but does not advance the stream here.
-      elseif command >= 0x80 then
-        velocity = byte(data, pos) or 0x7F
-        local percent = byte(data, pos + 1) or 0
-        pos = pos + 2
-        duration = lastTimestamp - math.floor((percent * lastTimestamp) / 256)
-        tickState.tick = tickState.tick + lastTimestamp
-        lastTimestamp = lastTimestamp
-        addNote(out, tickState.tick, duration, note, velocity, channel, state)
-        skipTail = true
-      elseif command >= 0x40 then
-        velocity = byte(data, pos) or 0x7F
-        pos = pos + 1
-        duration = delta
+      local delta, nextPos
+      -- NOTEVG has no delay operand; short NOTEDV uses shortNoteDefaultDelay.
+      if noteClass >= 0x80 or (not state.started and noteClass >= 0x40) then
+        nextPos = pos + 1
+        delta = noteClass >= 0x80 and state.lastDelay or state.shortDelay
       else
-        velocity = byte(data, pos) or 0x7F
-        local percent = byte(data, pos + 1) or 0
-        pos = pos + 2
-        duration = delta - math.floor((percent * delta) / 256)
+        delta, nextPos = timeValue(data, pos + 1, limit)
       end
-      if not skipTail then
-        tickState.tick = tickState.tick + delta
-        lastTimestamp = delta
-        addNote(out, tickState.tick, duration, note, velocity, channel, state)
+      pos = nextPos
+      local velocity, gateTime = state.velocity, state.gateTime
+      if state.started then
+        if noteClass >= 0x80 then
+          velocity = byte(data, pos) or velocity
+          gateTime = byte(data, pos + 1) or gateTime
+          pos = pos + 2
+        elseif noteClass >= 0x40 then
+          velocity = byte(data, pos) or velocity
+          gateTime = 0
+          pos = pos + 1
+          state.lastDelay = delta
+        else
+          velocity = byte(data, pos) or velocity
+          gateTime = byte(data, pos + 1) or gateTime
+          pos = pos + 2
+          state.lastDelay = delta
+        end
+        state.velocity = velocity
+        state.gateTime = gateTime
+      elseif noteClass < 0x40 then
+        state.lastDelay = delta
       end
+      tickState.tick = tickState.tick + delta
+      addNote(out, tickState.tick, math.floor(gateTime * delta / 256),
+        note, velocity, channel, state, rawNote + state.coarse)
     else
       local length = LAYER_LEN[command] or 0
       pos = pos + 1 + length
@@ -168,8 +189,15 @@ local function parseChannel(ctx, data, offset, limit, channel, state, tickState,
     if seen[mark] then return end
     seen[mark] = true
     local command = byte(data, pos)
-    if command == nil or command == 0xFF or command == 0xFE then return end
-    if command < 0x10 then
+    if command == nil or command == 0xFF then return end
+    if command == 0xFE then
+      tickState.tick = tickState.tick + 1
+      pos = pos + 1
+    elseif command == 0xFD then
+      local delta, nextPos = timeValue(data, pos + 1, limit)
+      pos = nextPos
+      tickState.tick = tickState.tick + delta
+    elseif command < 0x10 then
       tickState.tick = tickState.tick + command
       pos = pos + 1
     elseif command < 0x20 then
@@ -230,8 +258,11 @@ local function parseSequence(data)
   while pos <= limit and guard < 16384 do
     guard = guard + 1
     local command = byte(data, pos)
-    if command == nil or command == 0xFF or command == 0xFE then break end
-    if command >= 0x90 and command < 0xA0 then
+    if command == nil or command == 0xFF then break end
+    if command == 0xFE then
+      absoluteTick = absoluteTick + 1
+      pos = pos + 1
+    elseif command >= 0x90 and command < 0xA0 then
       local target = u16(data, pos + 1)
       if not target then break end
       local channel = command % 0x10
@@ -272,17 +303,15 @@ local function parseSequence(data)
   return { events = ctx.out, tempo = ctx.tempo, ticks = maxTick }
 end
 
+-- EAD SoundFontSound.tuning is (rate / 32000) * 2^((60 - baseNoteMidi) / 12).
+-- N64 playback is 32000 Hz, so recover MIDI as 60 - 12*log2(tuning).
 local function keyBaseToPitch(value)
   value = tonumber(value) or 1
-  if math.abs(value) < 0.00001 then value = 1 end
-  local best, bestDistance = 60, math.huge
-  for x = 0, 127 do
-    local distance = math.abs(value - 2 ^ ((60 - x) / 12))
-    if distance < bestDistance then
-      bestDistance, best = distance, x
-    end
-  end
-  return best
+  if not (value > 0) then return 60 end
+  local pitch = math.floor(60 - 12 * math.log(value) / math.log(2) + 0.5)
+  if pitch < 0 then pitch = 0 end
+  if pitch > 127 then pitch = 127 end
+  return pitch
 end
 
 local function adsrFields(def)
@@ -303,12 +332,19 @@ local function buildPcm(decoded, bankIndex, bank, songName)
   local lastTick = 0
   local bankKey = "n64:" .. tostring(bankIndex)
   for _, note in ipairs(decoded.events) do
-    local def = bank[(note.instrument or 0) + 1] or bank[1]
+    local instrument = note.instrument or 0
+    local def
+    if instrument == 0x7F then
+      def = bank.drums and bank.drums[(note.drum or 0) + 1]
+    else
+      def = bank[instrument + 1]
+    end
     if def and def.wave then
       local attack, decay, sustain, release = adsrFields(def)
       local event = {
         tick = note.tick, gate = note.gate, track = note.channel,
-        key = note.note, pitch = keyBaseToPitch(def.keyBase),
+        key = instrument == 0x7F and 60 or note.note,
+        pitch = keyBaseToPitch(def.keyBase),
         vel = note.vel, volume = note.volume, pan = note.pan,
         bank = bankKey, archive = def.waveArchiveID, wave = def.waveID,
         attack = attack, decay = decay, sustain = sustain, release = release,
@@ -348,13 +384,21 @@ local function convertSong(song, bankIndex, bank, name)
     name = name, tracks = 1, trackData = { carrier }, voicegroup = 1,
   }, { voicegroupId = 1 })
   if not specs or #specs == 0 then return nil end
-  specs[#specs].pcm = pcm
+  local def = specs[#specs]
+  def.pcm = pcm
+  def.name = name
+  def.generation = 1
+  def.n64Mix = true
+  def.converter = CONVERTER_VERSION
+  def.sourceTracks = 1
+  -- Gen3 plays record.def through ChipAudio, which ignores def.pcm.  The
+  -- PCM side must live in record.extra for gbaExtraAudio to start.
+  local extraSpec = {}
+  for key, value in pairs(def) do extraSpec[key] = value end
   return {
-    def = {
-      name = name, generation = 1, n64Mix = true,
-      converter = CONVERTER_VERSION, sourceTracks = 1,
-    },
-    extra = {}, tracks = 1, specs = specs, tempo = decoded.tempo,
+    def = def,
+    extra = { n64 = extraSpec },
+    tracks = 1, specs = specs, tempo = decoded.tempo,
   }
 end
 

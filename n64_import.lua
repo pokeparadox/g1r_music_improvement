@@ -312,6 +312,29 @@ local function parseInstrument(ctl, entry, index)
   return def
 end
 
+local function parseDrum(ctl, entry, index)
+  local listOff = u32(ctl, 0)
+  if not listOff or listOff + index * 4 + 4 > #ctl then return nil end
+  local off = u32(ctl, listOff + index * 4)
+  if not off or off == 0 or off + 0x10 > #ctl then return nil end
+  local waveOff = u32(ctl, off + 4)
+  if not waveOff or waveOff == 0 then return nil end
+  local wave = waveDescriptor(ctl, off, waveOff)
+  if not wave then return nil end
+  local def = {
+    type = "vadpcm", bank = entry.index, waveID = 0, drum = true,
+    waveArchiveID = entry.tbl1 or 0, keyBase = beFloat(ctl, off + 8),
+    pan = u8(ctl, off + 1) or 0x40, gain = 0x7F, wave = wave,
+  }
+  local adsrOff = u32(ctl, off + 0xC)
+  if adsrOff and adsrOff + 0x10 <= #ctl then
+    local adsr = {}
+    for i = 0, 7 do adsr[#adsr + 1] = u16(ctl, adsrOff + i * 2) end
+    def.adsr = adsr
+  end
+  return def
+end
+
 function M.readBank(bank)
   local index = type(bank) == "table" and bank.index or tonumber(bank)
   local data = open()
@@ -321,59 +344,91 @@ function M.readBank(bank)
   if sampleCache[key] then return sampleCache[key] end
   local ctl = readRange(entry.offset, entry.size)
   if not ctl then return nil end
-  local defs = {}
-  for i = 0, (entry.normal or 0) + (entry.percussion or 0) - 1 do
+  local defs = { drums = {} }
+  for i = 0, (entry.normal or 0) - 1 do
     local def = parseInstrument(ctl, entry, i)
-    if def then defs[#defs + 1] = def end
+    if def then defs[i + 1] = def end
+  end
+  for i = 0, (entry.percussion or 0) - 1 do
+    local def = parseDrum(ctl, entry, i)
+    if def then defs.drums[i + 1] = def end
   end
   sampleCache[key] = defs
   return defs
 end
 
-local function s4(v)
-  return v >= 8 and v - 16 or v
+-- Matches zeldaret/oot tools/audio/sampleconv/src/codec/vadpcm.c.
+local function expandBook(book, order, npred)
+  local pages = {}
+  local n = 1
+  for i = 1, npred do
+    local rows = {}
+    for k = 0, 7 do rows[k + 1] = {} end
+    for j = 0, order - 1 do
+      for k = 0, 7 do
+        rows[k + 1][j + 1] = book[n] or 0
+        n = n + 1
+      end
+    end
+    for k = 1, 7 do
+      rows[k + 1][order + 1] = rows[k][order]
+    end
+    rows[1][order + 1] = 2048
+    for k = 1, 7 do
+      for j = k, 7 do
+        rows[j + 1][k + order + 1] = rows[j - k + 1][order + 1]
+      end
+    end
+    pages[i] = rows
+  end
+  return pages
 end
 
-local function decodeVadpcm(blob, predictors, outCount)
-  if type(blob) ~= "string" or type(predictors) ~= "table" or #predictors < 64 then return "" end
+local function innerProduct(row, input, length)
+  local sum = 0
+  for i = 1, length do
+    sum = sum + row[i] * input[i]
+  end
+  return math.floor(sum / 2048)
+end
+
+local function decodeVadpcm(blob, book, order, npred, outCount)
+  local needed = 8 * order * npred
+  if type(blob) ~= "string" or type(book) ~= "table" or #book < needed then return "" end
+  local pages = expandBook(book, order, npred)
   local frames = math.min(math.floor(#blob / 9), math.ceil(outCount / 16))
-  local out, v1, v2, last = {}, 0x7FFF, 0x7FFF, 0
+  local state, out, produced = {}, {}, 0
+  for i = 0, 15 do state[i] = 0 end
   for f = 0, frames - 1 do
     local p = f * 9
     local h = blob:byte(p + 1) or 0
-    -- Source: index = (header & 0xF) << 1; rows 0..3 are usable.
-    local index = (h % 16) * 2
-    if index > 6 then break end
-    local shift = 2 ^ (math.floor(h / 16) % 32)
-    local coeff = {}
-    for i = 0, 3 do
-      local b = blob:byte(p + 2 + i) or 0
-      coeff[i * 2] = s4(math.floor(b / 16))
-      coeff[i * 2 + 1] = s4(b % 16)
+    local scale = 2 ^ (math.floor(h / 16) % 16)
+    local predictor = (h % 16) + 1
+    if predictor > npred then predictor = 1 end
+    local page = pages[predictor]
+    local ix = {}
+    for i = 0, 15 do
+      local b = blob:byte(p + 2 + math.floor(i / 2)) or 0
+      local nibble = (i % 2 == 0) and math.floor(b / 16) or (b % 16)
+      if nibble >= 8 then nibble = nibble - 16 end
+      ix[i] = nibble * scale
     end
-    for _half = 0, 1 do
-      local halfOut = {}
-      for i = 0, 7 do
-        local res1 = coeff[i] * 0x800
-        for j = 0, i - 1 do
-          local k = i - j - 1
-          res1 = res1 + (predictors[(index + 1) * 8 + k] or 0) * coeff[j]
-        end
-        res1 = res1 * shift
-        local res2 = v1 * (predictors[index * 8 + i + 1] or 0)
-          + v2 * (predictors[(index + 1) * 8 + i + 1] or 0)
-        local v = math.floor((res1 * 32 + res2 * 32) / 65536)
-        if v > 32767 then v = 32767 elseif v < -32768 then v = -32768 end
-        halfOut[i] = v
-        out[#out + 1] = pack16(v)
-        last = last + 1
-        if last >= outCount then break end
+    for half = 0, 1 do
+      local input = {}
+      for i = 0, order - 1 do
+        input[i + 1] = state[(2 - half) * 8 - order + i]
       end
-      if last >= outCount then break end
-      -- Source updates v1/v2 from samples 6/7 only after each 8-sample half.
-      v1, v2 = halfOut[6], halfOut[7]
+      for i = 0, 7 do
+        local ind = half * 8 + i
+        input[order + i + 1] = ix[ind]
+        local v = innerProduct(page[i + 1], input, order + i) + ix[ind]
+        state[ind] = v
+        if v > 32767 then v = 32767 elseif v < -32768 then v = -32768 end
+        out[#out + 1] = pack16(v)
+        produced = produced + 1
+        if produced >= outCount then return table.concat(out) end
+      end
     end
-    if last >= outCount then break end
   end
   return table.concat(out)
 end
@@ -395,15 +450,18 @@ function M.readSample(bank, def)
   local p = wave.predictorOffset
   if not p or p + 8 > #ctl then return nil end
   local order, npred = u32(ctl, p), u32(ctl, p + 4)
-  if not order or not npred or order < 1 or npred < 1 then return nil end
-  -- Tool copies a fixed 0x80-byte predictor table regardless of order/npred.
-  local predictors = {}
-  for i = 0, 63 do
-    predictors[i + 1] = i16(ctl, p + 8 + i * 2) or 0
+  if not order or not npred or order < 1 or order > 8
+      or npred < 1 or npred > 16 then return nil end
+  local used = 8 * order * npred
+  if p + 8 + used * 2 > #ctl then return nil end
+  local book = {}
+  for i = 0, used - 1 do
+    book[i + 1] = i16(ctl, p + 8 + i * 2) or 0
   end
   local blob = readRange(tblEntry.offset + wave.base, wave.sourceSize or wave.length)
   if not blob then return nil end
-  local pcm = decodeVadpcm(blob, predictors, wave.loopEnd or math.floor(wave.length / 9) * 16)
+  local pcm = decodeVadpcm(blob, book, order, npred,
+    wave.loopEnd or math.floor(wave.length / 9) * 16)
   local out = {
     data = pcm, sampleRate = wave.sampleRate or 32000,
     loop = wave.loopStart < wave.loopEnd, loopStart = wave.loopStart,

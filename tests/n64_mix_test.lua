@@ -33,7 +33,7 @@ assert(n64Mix.has("red", "not-a-song") == false)
 local converted, err = n64Mix.convert("red", "SEQ_N64_00", "pcm")
 assert(converted, err)
 assert(converted.def.n64Mix == true)
-assert(converted.def.converter == "n64_v2_pcm_pcm")
+assert(converted.def.converter == "n64_v3_pcm_pcm")
 assert(converted.def.key == "SEQ_N64_00" and converted.def.version == "red")
 assert(converted.tempo == 120)
 assert(capturedSong and capturedSong.tracks == 1)
@@ -41,14 +41,38 @@ assert(capturedOptions and capturedOptions.voicegroupId == 1)
 
 local spec = converted.specs[#converted.specs]
 assert(spec.pcm and #spec.pcm.events == 1)
+assert(converted.def == spec and converted.def.pcm == spec.pcm)
+assert(converted.extra and converted.extra.n64
+  and converted.extra.n64.pcm == spec.pcm,
+  "PCM must ride record.extra so Gen3 starts gbaExtraAudio")
 assert(spec.pcm.tempoTimeline[1].tempo == 240,
   "120 BPM must map to legacy grid tempo 240")
 local event = spec.pcm.events[1]
-assert(event.tick == 48 and event.gate == 48)
+assert(event.tick == 48 and event.gate == 1,
+  "large NOTEDV sets gateTime=0; addNote clamps gate to one tick")
 assert(event.key == 66 and event.pitch == 60)
 assert(event.bank == "n64:0" and event.wave == 0)
 assert(event.vel == 0x7F)
 assert(event.attack == 127 and event.release == 127)
+
+-- EAD tuning is (rate / 32000) * 2^((60 - baseNoteMidi) / 12).
+-- Tuning 2.0 is one octave below middle C.
+local realReadBank = n64Mix.deps.n64.readBank
+n64Mix.deps.n64.readBank = function(index)
+  local bank = realReadBank(index)
+  if type(bank) ~= "table" then return bank end
+  local copy = {}
+  for i, def in ipairs(bank) do
+    local clone = {}
+    for k, v in pairs(def) do clone[k] = v end
+    if i == 1 then clone.keyBase = 2.0 end
+    copy[i] = clone
+  end
+  return copy
+end
+local tuned = assert(n64Mix.convert("red", "SEQ_N64_00", "pcm"))
+assert(tuned.specs[#tuned.specs].pcm.events[1].pitch == 48)
+n64Mix.deps.n64.readBank = realReadBank
 
 assert(n64Mix.convert("red", "SEQ_N64_41", "pcm") == nil,
   "unmapped sequences must not silently convert sequence 0")

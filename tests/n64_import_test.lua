@@ -24,10 +24,14 @@ assert(sequence.size == 0x40 and sequence.index == 0)
 assert(sequence.data:byte(1) == 0xDD and sequence.data:byte(2) == 0x78)
 
 local bank = assert(n64.readBank(0))
-assert(#bank == 1)
+assert(bank[1] and bank[3] and bank[2] == nil,
+  "sparse instrument indices must be preserved")
 assert(bank[1].waveID == 0 and bank[1].waveArchiveID == 0)
 assert(bank[1].keyBase > 0.99 and bank[1].keyBase < 1.01)
 assert(bank[1].wave.type == "vadpcm" and bank[1].wave.sampleRate == 32000)
+assert(bank[3] and bank[3].waveID == 2 and bank[3].keyBase > 1.99)
+local drum = bank.drums and bank.drums[1]
+assert(drum and drum.drum == true and drum.pan == 0x50 and drum.wave)
 
 local sample = assert(n64.readSample(0, bank[1]))
 assert(sample.format == "vadpcm")
