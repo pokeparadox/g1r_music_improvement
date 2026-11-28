@@ -26,21 +26,44 @@ return function(mod)
   end
   if isSongData(Data) then liveData = Data end
 
+  local function appendN64LoadDiag(line)
+    if not (mod.cache and type(mod.cache.write) == "function") then return end
+    local previous = ""
+    if type(mod.cache.read) == "function" then
+      local ok, value = pcall(mod.cache.read, mod.cache, "n64_load.log")
+      if ok and type(value) == "string" then previous = value end
+    end
+    pcall(function()
+      mod.cache:write("n64_load.log", previous .. line .. "\n")
+    end)
+  end
   local function loadModFile(name)
     local source = mod:read(name)
     if not source then
       mod.log:error("%s missing from %s -- reinstall the mod", name, mod.path)
+      if name:match("^n64") then
+        appendN64LoadDiag(name .. " read=nil path=" .. tostring(mod.path))
+      end
       return nil
     end
     local chunk, compileErr = load(source, "@" .. mod.path .. "/" .. name)
     if not chunk then
       mod.log:error("%s did not compile: %s", name, tostring(compileErr))
+      if name:match("^n64") then
+        appendN64LoadDiag(name .. " compile=" .. tostring(compileErr))
+      end
       return nil
     end
     local ok, result = pcall(chunk)
     if not ok then
       mod.log:error("%s failed to assemble: %s", name, tostring(result))
+      if name:match("^n64") then
+        appendN64LoadDiag(name .. " run=" .. tostring(result))
+      end
       return nil
+    end
+    if name:match("^n64") then
+      appendN64LoadDiag(name .. " ok type=" .. type(result) .. " bytes=" .. #source)
     end
     return result
   end
@@ -64,9 +87,15 @@ return function(mod)
   local ndsImport = loadModFile("nds_import.lua")
   local g4SongMap = loadModFile("g4_song_map.lua")
   local g4Mix = loadModFile("g4_mix.lua")
+  local n64Import = loadModFile("n64_import.lua")
+  local n64SongMap = loadModFile("n64_song_map.lua")
+  local n64Mix = loadModFile("n64_mix.lua")
   local function isG4VariantId(id)
     id = tostring(id or "")
     return id:match("^Music_G4Mix") ~= nil or id:match("^Music_G4GB") ~= nil
+  end
+  local function isN64VariantId(id)
+    return tostring(id or ""):match("^Music_N64Mix") ~= nil
   end
   local sourceFor, sourceHasSong
   if ndsImport and ndsImport.install then
@@ -82,8 +111,51 @@ return function(mod)
       end,
     })
   end
+  if n64Import and n64Import.install then
+    pcall(n64Import.install, { imports = mod.imports, cache = mod.cache })
+  end
+  if n64Mix and n64Mix.install then
+    pcall(n64Mix.install, {
+      g3Mix = g3Mix, n64 = n64Import, songMap = n64SongMap, cache = mod.cache,
+      versions = versions,
+      available = function()
+        return n64Import and n64Import.status and n64Import.status().available or false
+      end,
+    })
+  end
+  local n64ImportErrorLogged = false
+  local n64MismatchLogged = false
+  local n64MusicTestLogged = false
+  local n64MusicTestEntryLogged = false
+  local n64MusicTestOpenLogged = false
+  local function writeN64Diag(filename, line)
+    mod.log:warn("%s", line)
+    if mod.cache and type(mod.cache.write) == "function" then
+      local ok, err = pcall(function() mod.cache:write(filename, line .. "\n") end)
+      if not ok then
+        mod.log:warn("music_improvement: N64 diagnostic write failed: %s", tostring(err))
+      end
+    else
+      mod.log:warn("music_improvement: N64 diagnostic cache unavailable")
+    end
+  end
+  local function n64ImportReady()
+    local st = n64Import and n64Import.status and n64Import.status()
+    local ready = st and st.available == true
+    if ready and not n64MismatchLogged then
+      if not n64Mix then
+        n64MismatchLogged = true
+        mod.log:warn("music_improvement: N64 import ready but n64_mix.lua missing")
+      elseif n64Mix.available and not n64Mix.available() then
+        n64MismatchLogged = true
+        mod.log:warn("music_improvement: N64 import ready but mix unavailable")
+      end
+    end
+    return ready
+  end
   local mixCandidatesFor
   local g4CandidatesFor
+  local n64CandidatesFor
   local gen3Ui
   local openGen3Sources
   local improve = function(src, settings) return improveModule.improve(src, settings) end
@@ -122,6 +194,31 @@ return function(mod)
       loopStart = loopStart, loopEnd = size - 1, loop = loop }
   end
   local function readNdsSample(bank, def)
+    if type(bank) == "string" then
+      local n64Index = bank:match("^n64:(%d+)$")
+      if n64Index and n64Import and n64Import.readBank and n64Import.readSample then
+        local index = tonumber(n64Index)
+        local wave = type(def) == "table" and tonumber(def.waveID_dutyCycle) or nil
+        local archive = type(def) == "table" and tonumber(def.waveArchiveID) or nil
+        local instruments = n64Import.readBank(index) or {}
+        local fallback
+        for _, instrument in ipairs(instruments) do
+          if instrument.wave then
+            fallback = fallback or instrument
+            if wave and tonumber(instrument.waveID) == wave
+                and (not archive or tonumber(instrument.waveArchiveID) == archive) then
+              local ok, sample = pcall(n64Import.readSample, index, instrument)
+              if ok then return sample end
+            end
+          end
+        end
+        if fallback then
+          local ok, sample = pcall(n64Import.readSample, index, fallback)
+          if ok then return sample end
+        end
+        return nil
+      end
+    end
     if type(bank) == "table" and bank.gba or type(def) == "table" and def.gba then
       local ok, sample = pcall(readGbaSample, bank, def)
       if ok then return sample end
@@ -173,6 +270,7 @@ return function(mod)
         g3_mix = optionBool("alt_g3_mix", true),
         g4_mix = optionBool("alt_g4_mix", true),
         g4_gb = optionBool("alt_g4_gb", true),
+        n64_mix = optionBool("alt_n64_mix", true),
       },
     }
   end
@@ -236,6 +334,9 @@ return function(mod)
     if (def.g4Mix or def.g4Gb) and def.pcm then translated.pcm = def.pcm end
     if (def.g4Mix or def.g4Gb) and def.gain then translated.gain = def.gain end
     if (def.g4Mix or def.g4Gb) and def.pan then translated.pan = def.pan end
+    if def.n64Mix and def.pcm then translated.pcm = def.pcm end
+    if def.n64Mix and def.gain then translated.gain = def.gain end
+    if def.n64Mix and def.pan then translated.pan = def.pan end
     translated.generation = 1
     if extra then
       local extraSong = {}
@@ -737,6 +838,8 @@ return function(mod)
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g4_gb", type = "toggle", label = "G4 (GB)", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
+    { key = "alt_n64_mix", type = "toggle", label = "N64 Mix", default = true,
+      visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "alt_g3_native", type = "toggle", label = "G3", default = true,
       visible_if = { key = "__music_improvement_hidden", equals = true } },
     { key = "extra_mix", type = "number", label = "EXTRA HARMONY MIX",
@@ -941,12 +1044,16 @@ return function(mod)
 
   local function variantIdFor(nativeId, version, enabled, candidate)
     local isG4 = candidate and (candidate.g4Mix or candidate.g4Gb)
+    local isN64 = candidate and candidate.n64Mix == true
     local rawName = isG4 and type(candidate.label) == "string"
       and candidate.label:match("^G4:(.+)$") or nil
+    rawName = rawName or (isN64 and type(candidate.label) == "string"
+      and candidate.label:match("^N64:(.+)$") or nil)
     local source = rawName or nativeId
     local suffix = tostring(source):gsub("^Music_", ""):gsub("^MUS_", "")
       :gsub("[^%w_]", "_")
-    local base = candidate and candidate.g4Gb and "Music_G4GB"
+    local base = isN64 and "Music_N64Mix"
+      or candidate and candidate.g4Gb and "Music_G4GB"
       or candidate and candidate.g4Mix and "Music_G4Mix"
       or candidate and candidate.mix and "Music_Mix"
       or enabled and "Music_Improved" or "Music_Stock"
@@ -959,8 +1066,9 @@ return function(mod)
   end
 
   local function variantKeyFor(nativeId, candidate, enabled)
-    local kind = candidate.g4Gb and "B" or (candidate.g4Mix and "G"
-      or (candidate.mix and "M" or (enabled and "I" or "S")))
+    local kind = candidate.n64Mix and "N" or (candidate.g4Gb and "B"
+      or (candidate.g4Mix and "G"
+      or (candidate.mix and "M" or (enabled and "I" or "S"))))
     return tostring(nativeId or "") .. "|" .. tostring(candidate.version)
       .. ":" .. tostring(candidate.label) .. ":" .. kind
   end
@@ -982,6 +1090,7 @@ return function(mod)
       mix = candidate.mix == true,
       g4Mix = candidate.g4Mix == true,
       g4Gb = candidate.g4Gb == true,
+      n64Mix = candidate.n64Mix == true,
     }
     variantByKey[key] = record
     recordById[improvedId] = record
@@ -1005,12 +1114,22 @@ return function(mod)
     end
     local list = {}
     local rawName = tostring(nativeId):match("^_(.+)$")
-    if rawName and g4Mix and g4Mix.available and g4Mix.available() then
-      for _, mode in ipairs({ "pcm", "chip" }) do
+    local g4Ready = g4Mix and g4Mix.available and g4Mix.available()
+    local n64Ready = n64ImportReady()
+    if rawName and (g4Ready or n64Ready) then
+      if g4Ready then
+        for _, mode in ipairs({ "pcm", "chip" }) do
+          list[#list + 1] = {
+            version = activeCacheGame, generation = hostGeneration,
+            label = "G4:" .. rawName,
+            g4Mix = mode == "pcm", g4Gb = mode == "chip",
+          }
+        end
+      end
+      if n64Ready then
         list[#list + 1] = {
           version = activeCacheGame, generation = hostGeneration,
-          label = "G4:" .. rawName,
-          g4Mix = mode == "pcm", g4Gb = mode == "chip",
+          label = "N64:" .. rawName, n64Mix = true,
         }
       end
       candidateCache[cacheKey] = list
@@ -1033,6 +1152,11 @@ return function(mod)
       or (tostring(canonical):match("^MUS_") and canonical or nil)
     if g4CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then
       for _, candidate in ipairs(g4CandidatesFor(nativeId, hostGeneration, group)) do
+        list[#list + 1] = candidate
+      end
+    end
+    if n64CandidatesFor and group and versions.mixAllowed(group, hostGeneration) then
+      for _, candidate in ipairs(n64CandidatesFor(nativeId, hostGeneration, group)) do
         list[#list + 1] = candidate
       end
     end
@@ -1373,6 +1497,31 @@ return function(mod)
     return out
   end
 
+  n64CandidatesFor = function(nativeId, hostGeneration, group)
+    local out, seen = {}, {}
+    if not n64ImportReady() then return out end
+    local labels = {}
+    if group then
+      for _, generation in ipairs({ "gen1", "gen2", "gen3" }) do
+        if group[generation] then labels[#labels + 1] = group[generation] end
+      end
+      if group.name then labels[#labels + 1] = group.name end
+    end
+    labels[#labels + 1] = nativeId
+    for _, label in ipairs(labels) do
+      local song = n64SongMap and n64SongMap.mappedSongFor
+        and n64SongMap.mappedSongFor(label, "pcm")
+      if song and not seen[song.index] and n64Mix and n64Mix.has(activeCacheGame, label) then
+        seen[song.index] = true
+        out[#out + 1] = {
+          version = activeCacheGame, generation = hostGeneration,
+          label = label, n64Mix = true,
+        }
+      end
+    end
+    return out
+  end
+
   local mixSongListCache
   local function mixSongList()
     if mixSongListCache then return mixSongListCache end
@@ -1462,12 +1611,26 @@ return function(mod)
       end
       table.sort(variantIds)
     end
+    if n64ImportReady() and n64Mix and n64Mix.listSongs then
+      local rawSeen = {}
+      for _, id in ipairs(variantIds) do rawSeen[id] = true end
+      for _, song in ipairs(n64Mix.listSongs()) do
+        local name = type(song) == "table" and song.name or tostring(song)
+        local nativeId = "_" .. tostring(name):gsub("[^%w]", "_")
+        if not rawSeen[nativeId] then
+          rawSeen[nativeId] = true
+          variantIds[#variantIds + 1] = nativeId
+        end
+      end
+      table.sort(variantIds)
+    end
     local hash = settingsHash(settings)
     for _, id in ipairs(ids) do
       if not tostring(id):match("^Music_Improved")
           and not tostring(id):match("^Music_Stock")
           and not tostring(id):match("^Music_Mix")
-          and not isG4VariantId(id) then
+          and not isG4VariantId(id)
+          and not isN64VariantId(id) then
         local def = isSongData(data) and data.audio.songs[id] or nil
         local shouldProcess = true
         if shouldProcess then
@@ -1519,11 +1682,12 @@ return function(mod)
         if not tostring(id):match("^Music_Improved")
             and not tostring(id):match("^Music_Stock")
             and not tostring(id):match("^Music_Mix")
-              and not isG4VariantId(id) then
+              and not isG4VariantId(id)
+              and not isN64VariantId(id) then
           for _, candidate in ipairs(candidatesFor(id, settings)) do
             for _, enabled in ipairs(enabledList) do
               if (not candidate.mix and not candidate.g4Mix
-                  and not candidate.g4Gb) or enabled then
+                  and not candidate.g4Gb and not candidate.n64Mix) or enabled then
                 local s2 = { enabled = enabled }
                 local record = loadVariant(id, candidate, s2)
                 if record then
@@ -1544,7 +1708,8 @@ return function(mod)
                       enabled = enabled,
                       mix = candidate.mix == true,
                       g4Mix = candidate.g4Mix == true,
-      g4Gb = candidate.g4Gb == true,
+                      g4Gb = candidate.g4Gb == true,
+                      n64Mix = candidate.n64Mix == true,
                     }
                   end
                 end
@@ -1677,6 +1842,15 @@ return function(mod)
         return nil
       end
       translated = registerSpec(converted.def, ss, entry.improvedId, converted.extra)
+    elseif entry.n64Mix then
+      local converted = n64Mix and n64Mix.convert and
+        n64Mix.convert(entry.version, entry.label, "pcm")
+      if not converted then
+        mod.log:warn("music_improvement: no N64 data for %s (%s)",
+          tostring(entry.label), tostring(entry.version))
+        return nil
+      end
+      translated = registerSpec(converted.def, ss, entry.improvedId, converted.extra)
     else
       local source = sourceFor(entry.version)
       local def = source and source.view.content.music:get(entry.label)
@@ -1716,6 +1890,7 @@ return function(mod)
       mix = candidate.mix == true,
       g4Mix = candidate.g4Mix == true,
       g4Gb = candidate.g4Gb == true,
+      n64Mix = candidate.n64Mix == true,
     }, s)
   end
 
@@ -1865,7 +2040,7 @@ return function(mod)
     local ids, seen = {}, {}
     for id in mod.content.music:each() do
       if not seen[id] and not tostring(id):match("^Music_Mix")
-          and not isG4VariantId(id) then
+          and not isG4VariantId(id) and not isN64VariantId(id) then
         seen[id] = true; ids[#ids + 1] = id
       end
     end
@@ -1874,7 +2049,7 @@ return function(mod)
     if type(songs) == "table" then
       for id in pairs(songs) do
         if not seen[id] and not tostring(id):match("^Music_Mix")
-            and not isG4VariantId(id) then
+            and not isG4VariantId(id) and not isN64VariantId(id) then
           seen[id] = true; ids[#ids + 1] = id
         end
       end
@@ -1938,6 +2113,7 @@ return function(mod)
     { "alt_g4_mix", "G4 MIX" },
     { "alt_g4_gb", "G4 GB" },
     { "alt_g3_native", "G3" },
+    { "alt_n64_mix", "N64 MIX" },
   }
   local function sourceRight(game, key)
     if key == "alt_g3_native" and not hostIsGen3(game) then return "N/A" end
@@ -1945,6 +2121,7 @@ return function(mod)
         and (not g4Mix or not g4Mix.available or not g4Mix.available()) then
       return "N/A"
     end
+    if key == "alt_n64_mix" and not n64ImportReady() then return "N/A" end
     local value = optionValue(key)
     local off = value == false or tostring(value) == "0"
     -- FRLG font has no bracket glyphs; YES/NO render on every host.
@@ -1965,6 +2142,7 @@ return function(mod)
         and (not g4Mix or not g4Mix.available or not g4Mix.available()) then
       return false
     end
+    if key == "alt_n64_mix" and not n64ImportReady() then return false end
     local now = optionValue(key)
     local off = now == false or tostring(now) == "0"
     setModOption(game, key, off and "1" or "0")
@@ -2080,6 +2258,40 @@ return function(mod)
           else
             mod.ui.push(game, "MusicImprovementSources")
           end
+        end,
+      },
+
+      {
+        -- Stadium 2 audio is PCM-only; import status gates the N64 MIX row.
+        id = "sfxVol",
+        musicImprovementId = "music_improvement_n64_import",
+        label = "N64 IMPORT",
+        value = function()
+          local st = n64Import and n64Import.status and n64Import.status() or {}
+          if not st.available then
+            if st.error and not n64ImportErrorLogged then
+              n64ImportErrorLogged = true
+              mod.log:warn("music_improvement: N64 import unavailable: %s", tostring(st.error))
+            end
+            return st.error and "ERR" or "MISSING"
+          end
+          return string.format("READY %d", st.songCount or 0)
+        end,
+        activate = function(g)
+          local game = (type(g) == "table" and g.game) or g or readyGame
+          if n64Import and n64Import.install then
+            pcall(n64Import.install, { imports = mod.imports, cache = mod.cache })
+          end
+          if n64Mix and n64Mix.install then
+            pcall(n64Mix.install, {
+              g3Mix = g3Mix, n64 = n64Import, songMap = n64SongMap, cache = mod.cache,
+              versions = versions,
+              available = function()
+                return n64Import and n64Import.status and n64Import.status().available or false
+              end,
+            })
+          end
+          regenerateCache(game)
         end,
       },
 
@@ -2258,6 +2470,19 @@ return function(mod)
     if okGameVersion and GameVersion and GameVersion.generation then
       hostGen = GameVersion.generation(hostVersion) or hostGen
     end
+    if not n64MusicTestEntryLogged then
+      n64MusicTestEntryLogged = true
+      local st = n64Import and n64Import.status and n64Import.status() or {}
+      local songs = n64Mix and n64Mix.listSongs and n64Mix.listSongs() or {}
+      local names = {}
+      for i = 1, math.min(3, #songs) do
+        names[#names + 1] = tostring(songs[i].name or songs[i])
+      end
+      writeN64Diag("n64_menu_entry.log", string.format(
+        "music_improvement: N64 jukebox entry hostGen=%d game=%s ready=%s module=%s songs=%d first=%s available=%s error=%s",
+        hostGen, tostring(hostVersion), tostring(n64ImportReady()), tostring(n64Mix ~= nil),
+        #songs, table.concat(names, ","), tostring(st.available == true), tostring(st.error or "")))
+    end
     local entries, seen = {}, {}
     local function baseImprovedVariant(id, generation)
       local baseId = improvedIdFor(id)
@@ -2329,6 +2554,7 @@ return function(mod)
                 mix = record.mix,
                 g4Mix = record.g4Mix,
                 g4Gb = record.g4Gb,
+                n64Mix = record.n64Mix,
                 generation = record.generation,
                 version = record.version,
                 id = record.id,
@@ -2348,7 +2574,8 @@ return function(mod)
       if not versions.byLabel[id]
           and not tostring(id):match("^Music_Improved")
           and not tostring(id):match("^Music_Stock")
-          and not isG4VariantId(id) then
+          and not isG4VariantId(id)
+          and not isN64VariantId(id) then
         local variants = { { native = true, generation = hostGen, improved = false } }
         local base = baseImprovedVariant(id, hostGen)
         if base then variants[#variants + 1] = base end
@@ -2476,6 +2703,54 @@ return function(mod)
         end
       end
     end
+    if n64ImportReady() then
+      local songs = n64Mix and n64Mix.listSongs and n64Mix.listSongs() or {}
+      if not n64MusicTestLogged then
+        n64MusicTestLogged = true
+        local names = {}
+        for i = 1, math.min(3, #songs) do
+          names[#names + 1] = tostring(songs[i].name or songs[i])
+        end
+        local st = n64Import and n64Import.status and n64Import.status() or {}
+        local line = string.format(
+          "music_improvement: N64 jukebox module=%s songs=%d first=%s available=%s error=%s",
+          tostring(n64Mix ~= nil), #songs, table.concat(names, ","),
+          tostring(st.available == true), tostring(st.error or ""))
+        writeN64Diag("n64_menu.log", line)
+      end
+      local songIds = hostGen == 3 and gen3SongIds(game) or nil
+      local carrierId = songIds and next(songIds) and songIds[next(songIds)] or nil
+      for _, song in ipairs(songs) do
+        local rawName = tostring(song.name or song)
+        local nativeId = "_" .. rawName:gsub("[^%w]", "_")
+        local candidate = {
+          version = activeCacheGame, generation = hostGen,
+          label = "N64:" .. rawName, n64Mix = true,
+        }
+        local variants = {}
+        for _, record in ipairs(variantMap[nativeId] or {}) do
+          if record.n64Mix and record.id then
+            variants[#variants + 1] = {
+              candidate = record.candidate,
+              n64Mix = true, improved = true,
+              generation = record.generation or hostGen,
+              version = record.version, id = record.id,
+            }
+          end
+        end
+        if #variants == 0 then
+          variants[1] = {
+            candidate = candidate, n64Mix = true, improved = true,
+            generation = hostGen, version = activeCacheGame,
+          }
+        end
+        add({
+          name = rawName .. " (N64)",
+          nativeId = nativeId, playId = carrierId,
+          variants = variants,
+        })
+      end
+    end
     table.sort(entries, function(a, b)
       return a.name:lower() < b.name:lower()
     end)
@@ -2545,6 +2820,13 @@ return function(mod)
 
   openGen3Jukebox = function(game)
     local ui = gen3Ui()
+    if not n64MusicTestOpenLogged then
+      n64MusicTestOpenLogged = true
+      writeN64Diag("n64_menu_open.log", string.format(
+        "music_improvement: N64 jukebox open ui=%s game=%s hostGen=%s ready=%s",
+        tostring(ui ~= nil), tostring(cacheGameId(game or readyGame)),
+        tostring(hostGen), tostring(n64ImportReady())))
+    end
     if not ui then return false end
     local items = musicTestItems(musicTestEntries(game))
     if #items == 0 then
@@ -2613,6 +2895,9 @@ return function(mod)
   local g4HarmonyLogged = false
   local g4PeakStage = 0
   local g4PeakStages = { 44100 * 2, 44100 * 25 }
+  local n64HarmonyLogged = false
+  local n64PeakStage = 0
+  local n64PeakStages = { 44100 * 2, 44100 * 25 }
   local g3HarmonyLogged = false
   local g3PeakStage = 0
   local g3PeakStages = { 44100 * 2, 44100 * 25 }
@@ -2682,6 +2967,7 @@ return function(mod)
     -- engine. Stopping extras for a stall would leave only backing audible.
     -- extra_audio already resyncs drift on its own.
     if isG4VariantId(currentSong) then return end
+    if isN64VariantId(currentSong) then return end
     if over and (dt > 0.5 or now - cpuOverSince >= 1.0) then
       suppressExtra = true
       cpuOverSince = nil
@@ -2737,6 +3023,8 @@ return function(mod)
     suppressExtra = false
     g4HarmonyLogged = false
     g4PeakStage = 0
+    n64HarmonyLogged = false
+    n64PeakStage = 0
     g3HarmonyLogged = false
     g3PeakStage = 0
     cpuEma = 0
@@ -2772,6 +3060,12 @@ return function(mod)
         local t = extraAudio.telemetry()
         logG4Harmony("G4 harmony started sides=%s active=%s",
           table.concat(t.sides or {}, ","), tostring(t.active))
+      end
+      if isN64VariantId(song) and extraAudio.telemetry then
+        local t = extraAudio.telemetry()
+        logG3Harmony("N64 harmony started id=%s sides=%s active=%s pcm=%s",
+          tostring(song), table.concat(t.sides or {}, ","),
+          tostring(t.active), pcmTelemetry(t))
       end
       if gbaExtraAudio and gbaExtraAudio.telemetry then
         local t = gbaExtraAudio.telemetry()
@@ -2966,6 +3260,26 @@ return function(mod)
                   "G4 harmony stopped sides=%s peak=%.3f gain=%.2f rendered=%d",
                   table.concat(t.sides or {}, ","), t.peak or 0,
                   t.extraGain or 0, t.rendered or 0)
+              end
+            end
+          end
+          if isN64VariantId(currentSong) and extraAudio.telemetry then
+            local t = extraAudio.telemetry()
+            if t then
+              if n64PeakStage < #n64PeakStages
+                  and (t.rendered or 0) >= n64PeakStages[n64PeakStage + 1] then
+                n64PeakStage = n64PeakStage + 1
+                logG3Harmony(
+                  "N64 harmony rendered stage=%d sides=%s peak=%.3f gain=%.2f rendered=%d pcm=%s",
+                  n64PeakStage, table.concat(t.sides or {}, ","), t.peak or 0,
+                  t.extraGain or 0, t.rendered or 0, pcmTelemetry(t))
+              end
+              if t.givenUp and not n64HarmonyLogged then
+                n64HarmonyLogged = true
+                logG3Harmony(
+                  "N64 harmony stopped sides=%s peak=%.3f rendered=%d pcm=%s",
+                  table.concat(t.sides or {}, ","), t.peak or 0,
+                  t.rendered or 0, pcmTelemetry(t))
               end
             end
           end

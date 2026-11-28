@@ -192,6 +192,7 @@ end
 
 function M.pretty(label)
   label = tostring(label or "")
+  label = label:gsub("^N64:", ""):gsub("^G4:", "")
   label = label:gsub("^Music_", ""):gsub("^MUS_", "")
   label = label:gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
   return label
@@ -358,9 +359,10 @@ M.VARIANT_KINDS = {
   { key = "g3_mix", label = "G3 Mix" },
   { key = "g4_mix", label = "G4 Mix" },
   { key = "g4_gb", label = "G4 (GB)" },
+  { key = "n64_mix", label = "N64 Mix" },
 }
 M.MENU_KINDS = M.VARIANT_KINDS
-M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix", "g4_mix", "g4_gb" }
+M.ALTERNATIVE_KINDS = { "g1", "g1_improved", "g2", "g2_improved", "g3_mix", "g4_mix", "g4_gb", "n64_mix" }
 
 local VARIANT_LABELS = {}
 for _, item in ipairs(M.VARIANT_KINDS) do VARIANT_LABELS[item.key] = item.label end
@@ -379,6 +381,10 @@ function M.variantKind(value, hostGeneration)
   end
   if type(value) ~= "table" then return "g1" end
   local id = tostring(value.id or "")
+  if value.n64Mix or (value.candidate and value.candidate.n64Mix)
+      or id:match("^Music_N64Mix") then
+    return "n64_mix"
+  end
   if value.g4Gb or (value.candidate and value.candidate.g4Gb)
       or id:match("^Music_G4GB") then
     return "g4_gb"
@@ -437,6 +443,7 @@ function M.qualityRank(kind, hostGeneration)
   -- generic improved/stock variants.
   if canonical == "g4_mix" then return 2, 0 end
   if canonical == "g4_gb" then return 2, 1 end
+  if canonical == "n64_mix" then return 2, 2 end
   local generation = tonumber(tostring(canonical):match("^g(%d)")) or 1
   local tier = tostring(canonical):match("improved") and 2 or 3
   return tier, generation == tonumber(hostGeneration) and 0 or 1

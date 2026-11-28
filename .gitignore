@@ -44,5 +44,8 @@ luac.out
 
 *.nds
 *.gba
+*.z64
+*.n64
+*.v64
 *.validated
 
