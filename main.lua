@@ -2637,8 +2637,9 @@ return function(mod)
     local parts = {}
     for side, stats in pairs(t and t.pcm or {}) do
       parts[#parts + 1] = string.format(
-        "%s:ev=%d,ready=%d,miss=%d,act=%d,peak=%.3f", side,
-        stats.events or 0, stats.ready or 0, stats.missing or 0,
+        "%s:ev=%d,ready=%d,miss=%d,spawn=%d,stol=%d,retr=%d,act=%d,peak=%.3f",
+        side, stats.events or 0, stats.ready or 0, stats.missing or 0,
+        stats.spawned or 0, stats.stolen or 0, stats.retriggered or 0,
         stats.active or 0, stats.peak or 0)
     end
     return table.concat(parts, " ")

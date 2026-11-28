@@ -122,9 +122,10 @@ return function()
   -- ticks to output samples so PCM voices stay locked to chip events.
   local MAX_PCM_VOICES = 16
   -- PCM is rendered on the same bus as the extra chip voices; full-level GBA
-  -- Match other extra layers before pan/envelope; baseGain still applies.
+  -- Voice stealing lets dense Title overlap sum near full scale; 0.85 keeps
+  -- PCM clear without clipping the mixed bus.
   -- ponytail: fixed ceiling, add a profile knob only if FR sample level needs tuning.
-  local PCM_GAIN = 1.0
+  local PCM_GAIN = 0.85
   -- MP2K DS envelopes advance once per GBA VBlank; extraAudio renders at
   -- ChipSynth's rate, so convert that frame tick to output samples.
   local GBA_FRAME_SAMPLES = SAMPLE_RATE * 280896 / 16777216
@@ -292,6 +293,7 @@ return function()
       looping = true,
       stats = {
         events = #events, ready = ready, missing = missing,
+        spawned = 0, stolen = 0, retriggered = 0,
         active = 0, peak = 0,
       },
     }
@@ -315,6 +317,45 @@ return function()
     return built
   end
 
+  local function pcmSteal(pcm)
+    local victim, worst = nil, nil
+    for i, voice in ipairs(pcm.active) do
+      local score = (voice.released and 0 or SAMPLE_RATE * 4)
+        + voice.start - pcm.pos - (voice.envVol or 0)
+      if not worst or score < worst then
+        victim, worst = i, score
+      end
+    end
+    if victim then table.remove(pcm.active, victim) end
+  end
+
+  -- Legato on a looping sample keeps its current phase/envelope.  Strictly
+  -- earlier starts only: same-tick notes are a chord and must stay separate.
+  local function pcmRetrigger(pcm, event, at, ratio, gain, pan, gateSamples)
+    local sample = event.sample
+    if not sample or not sample.loop then return false end
+    local loopStart = math.floor(tonumber(sample.loopStart) or 0)
+    if loopStart <= 0 then return false end
+    local voice
+    for _, candidate in ipairs(pcm.active) do
+      if candidate.sample == sample and candidate.alive and not candidate.released
+          and candidate.start < at and at <= candidate.gateEnd
+          and candidate.phase < loopStart
+          and (not voice or candidate.start > voice.start) then
+        voice = candidate
+      end
+    end
+    if not voice then return false end
+    voice.step = ratio
+    voice.gateEnd = at + gateSamples
+    voice.stop = voice.gateEnd + pcmReleaseFrames(voice.adsr.release)
+    voice.gain = gain
+    voice.leftGain = 0.5 + 0.25 * (1 - pan)
+    voice.rightGain = 0.5 + 0.25 * (1 + pan)
+    if pcm.stats then pcm.stats.retriggered = pcm.stats.retriggered + 1 end
+    return true
+  end
+
   local function pcmRender(pcm, leftMix, rightMix, start, count, baseGain)
     if not pcm or #pcm.active == 0 and pcm.nextEvent > #pcm.events
         and pcm.loopSamples == 0 then return end
@@ -330,7 +371,7 @@ return function()
       if not event then break end
       local at = event.at + pcm.cycle * pcm.loopSamples
       if at > last then break end
-      if at >= start and #pcm.active < MAX_PCM_VOICES then
+      if at >= start then
         local data = event.sample.data
         local frames = math.floor(#data / 2)
         local rate = tonumber(event.sample.sampleRate) or SAMPLE_RATE
@@ -351,22 +392,33 @@ return function()
         }
         local releaseSamples = math.ceil(
           pcmReleaseFrames(adsr.release) * GBA_FRAME_SAMPLES)
-        pcm.active[#pcm.active + 1] = {
-          data = data, phase = 0, loopStart = loopStart,
-          endFrame = hasLoop and loopEnd or frames - 1,
-          loop = hasLoop and true or false,
-          step = ratio, start = at,
-          stop = at + event.gateSamples + releaseSamples,
-          gateEnd = at + event.gateSamples,
-          gain = baseGain * PCM_GAIN * event.gainScale
-            * math.sqrt((event.vel / 127) * (event.volume / 127)),
-          leftGain = 0.5 + 0.25 * (1 - pan),
-          rightGain = 0.5 + 0.25 * (1 + pan),
-          adsr = adsr, envPhase = adsr.attack > 0 and "attack" or "decay",
-          envVol = adsr.attack > 0 and 0 or 255, envFrom = 0,
-          envTick = at, nextTick = at + GBA_FRAME_SAMPLES,
-          released = false, alive = true,
-        }
+        local gain = baseGain * PCM_GAIN * event.gainScale
+          * math.sqrt((event.vel / 127) * (event.volume / 127))
+        if not pcmRetrigger(pcm, event, at, ratio, gain, pan,
+            event.gateSamples) then
+          if #pcm.active >= MAX_PCM_VOICES then
+            pcmSteal(pcm)
+            if pcm.stats then pcm.stats.stolen = pcm.stats.stolen + 1 end
+          end
+          if pcm.stats then pcm.stats.spawned = pcm.stats.spawned + 1 end
+          pcm.active[#pcm.active + 1] = {
+            sample = event.sample,
+            data = data, phase = 0, loopStart = loopStart,
+            endFrame = hasLoop and loopEnd or frames - 1,
+            loop = hasLoop and true or false,
+            step = ratio, start = at,
+            stop = at + event.gateSamples + releaseSamples,
+            gateEnd = at + event.gateSamples,
+            gain = gain,
+            leftGain = 0.5 + 0.25 * (1 - pan),
+            rightGain = 0.5 + 0.25 * (1 + pan),
+            adsr = adsr, envPhase = adsr.attack > 0 and "attack" or "decay",
+            envVol = adsr.attack > 0 and 0 or 255,
+            envFrom = adsr.attack > 0 and 0 or 255,
+            envTick = at, nextTick = at + GBA_FRAME_SAMPLES,
+            released = false, alive = true,
+          }
+        end
       end
       pcm.nextEvent = pcm.nextEvent + 1
     end
@@ -554,6 +606,9 @@ return function()
           events = stats.events or #pcm.events,
           ready = stats.ready or 0,
           missing = stats.missing or 0,
+          spawned = stats.spawned or 0,
+          stolen = stats.stolen or 0,
+          retriggered = stats.retriggered or 0,
           active = stats.active or #pcm.active,
           peak = stats.peak or 0,
         }
@@ -846,6 +901,9 @@ return function()
         events = stats.events or #pcm.events,
         ready = stats.ready or 0,
         missing = stats.missing or 0,
+        spawned = stats.spawned or 0,
+        stolen = stats.stolen or 0,
+        retriggered = stats.retriggered or 0,
         active = stats.active or #pcm.active,
         peak = stats.peak or 0,
       }
