@@ -4,7 +4,7 @@
 
 local M = {}
 
-local CONVERTER_VERSION = 10
+local CONVERTER_VERSION = 11
 local AUDIO_ROOT = "data/generated/gba/audio/"
 
 -- pret gClockTable: waits use cmd-0x80, notes use cmd-0xCF.
@@ -1016,7 +1016,7 @@ function M.buildSpecs(song, voicegroups, info)
             return toneForAdsr[field]
           end
           pcmEvents[#pcmEvents + 1] = {
-            tick = note.start, gate = note.gate,
+            tick = note.start, gate = note.gate, track = trackIndex,
             key = tonumber(segment.key) or 60,
             vel = tonumber(segment.vel) or 100,
             volume = tonumber(segment.volume) or 100,

@@ -130,6 +130,7 @@ return function()
   -- ChipSynth's rate, so convert that frame tick to output samples.
   local GBA_FRAME_SAMPLES = SAMPLE_RATE * 280896 / 16777216
   local RELEASE_FRAMES = 255
+  local LEGATO_GAP = math.floor(SAMPLE_RATE * 0.25)
 
   local function pcmSample(data, frame)
     local index = frame * 2 + 1
@@ -270,6 +271,7 @@ return function()
           or { attack = 255, decay = 0, sustain = 255, release = 98 }
         events[#events + 1] = {
           at = at, gateSamples = math.max(1, gateEnd - at),
+          track = event.track,
           key = tonumber(event.key) or 60, pitch = tonumber(event.pitch) or 60,
           rateHz = tonumber(event.rateHz),
           gainScale = math.max(0.1, tonumber(event.gainScale) or 1),
@@ -329,26 +331,36 @@ return function()
     if victim then table.remove(pcm.active, victim) end
   end
 
-  -- Legato on a looping sample keeps its current phase/envelope.  Strictly
-  -- earlier starts only: same-tick notes are a chord and must stay separate.
-  local function pcmRetrigger(pcm, event, at, ratio, gain, pan, gateSamples)
+  -- Legato on a looping sample keeps its current phase. Same track only:
+  -- overlapping notes on different tracks must stay separate voices.
+  -- Strictly earlier starts keep same-tick chords from collapsing.
+  local function pcmRetrigger(pcm, event, at, ratio, gain, pan, gateSamples,
+      adsr, releaseSamples)
     local sample = event.sample
     if not sample or not sample.loop then return false end
     local loopStart = math.floor(tonumber(sample.loopStart) or 0)
     if loopStart <= 0 then return false end
     local voice
     for _, candidate in ipairs(pcm.active) do
-      if candidate.sample == sample and candidate.alive and not candidate.released
-          and candidate.start < at and at <= candidate.gateEnd
-          and candidate.phase < loopStart
+      if candidate.sample == sample and candidate.alive
+          and (event.track == nil or candidate.track == event.track)
+          and candidate.start < at and at <= candidate.gateEnd + LEGATO_GAP
           and (not voice or candidate.start > voice.start) then
         voice = candidate
       end
     end
     if not voice then return false end
+    if voice.released then
+      voice.released = false
+      voice.envPhase = adsr.attack > 0 and "attack" or "decay"
+      voice.envFrom = voice.envVol
+      voice.envTick = pcm.pos
+      voice.nextTick = pcm.pos + GBA_FRAME_SAMPLES
+    end
+    voice.adsr = adsr
     voice.step = ratio
     voice.gateEnd = at + gateSamples
-    voice.stop = voice.gateEnd + pcmReleaseFrames(voice.adsr.release)
+    voice.stop = voice.gateEnd + releaseSamples
     voice.gain = gain
     voice.leftGain = 0.5 + 0.25 * (1 - pan)
     voice.rightGain = 0.5 + 0.25 * (1 + pan)
@@ -395,14 +407,14 @@ return function()
         local gain = baseGain * PCM_GAIN * event.gainScale
           * math.sqrt((event.vel / 127) * (event.volume / 127))
         if not pcmRetrigger(pcm, event, at, ratio, gain, pan,
-            event.gateSamples) then
+            event.gateSamples, adsr, releaseSamples) then
           if #pcm.active >= MAX_PCM_VOICES then
             pcmSteal(pcm)
             if pcm.stats then pcm.stats.stolen = pcm.stats.stolen + 1 end
           end
           if pcm.stats then pcm.stats.spawned = pcm.stats.spawned + 1 end
           pcm.active[#pcm.active + 1] = {
-            sample = event.sample,
+            sample = event.sample, track = event.track,
             data = data, phase = 0, loopStart = loopStart,
             endFrame = hasLoop and loopEnd or frames - 1,
             loop = hasLoop and true or false,
